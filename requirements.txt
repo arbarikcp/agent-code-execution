@@ -1,0 +1,7 @@
+# Minimal environment needed to run chapters/ notebooks and code.
+# Extended per-chapter as new dependencies are introduced (see each
+# chapter's README "Setup" note and PROGRESS.md).
+jupyter==1.1.1
+nbclient==0.11.0
+nbformat==5.10.4
+ipykernel==7.3.0
