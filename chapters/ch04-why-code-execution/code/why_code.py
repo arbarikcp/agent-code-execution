@@ -101,6 +101,33 @@ def summarize_benchmark(results: list[BenchmarkResult]) -> dict[str, dict]:
     return summary
 
 
+def sweep_budgets(budgets: list[int], ks: list[int]) -> dict[int, dict]:
+    """Success rate for both approaches, across a RANGE of step budgets.
+
+    The single-budget (8) snapshot shows ONE point on a curve. This sweeps
+    the budget itself, to answer: does the 57%-vs-100% gap from one budget
+    generalize, or was 8 a special case? A tight budget should hurt JSON
+    tool calling more (fewer k values fit); code should stay at ~100% for
+    any budget >= 2, since its step count never depends on k at all.
+    """
+    out: dict[int, dict] = {}
+    for budget in budgets:
+        results = run_benchmark(ks, max_steps=budget)
+        out[budget] = summarize_benchmark(results)
+    return out
+
+
+def render_budget_sweep(sweep: dict[int, dict]) -> str:
+    lines = [f"{'budget':>6} | {'json success rate':>18} | {'code success rate':>18} | {'max k JSON can fit':>18}"]
+    lines.append("-" * len(lines[0]))
+    for budget, summary in sweep.items():
+        json_rate = summary["json_tool_calls"]["success_rate"]
+        code_rate = summary["code_action"]["success_rate"]
+        max_k_json = max(budget - 2, 0)  # JSON needs k+2 steps; largest k that fits this budget
+        lines.append(f"{budget:>6} | {json_rate:>17.0%} | {code_rate:>17.0%} | {max_k_json:>18}")
+    return "\n".join(lines)
+
+
 def render_benchmark_table(results: list[BenchmarkResult]) -> str:
     ks = sorted({r.k for r in results})
     lines = [f"{'k':>3} | {'json steps':>10} | {'json ok':>7} | {'code steps':>10} | {'code ok':>7}"]
@@ -178,6 +205,29 @@ def demo_dynamic_revision() -> tuple[str, float]:
     return observation, namespace["avg"]
 
 
+# ---------------------------------------------------------------------------
+# 4. Costs and risks, measured: non-determinism is real, not just asserted
+# ---------------------------------------------------------------------------
+
+
+def demo_nondeterminism() -> tuple[str, str]:
+    """Run the IDENTICAL code string twice and show the outputs really differ.
+
+    A JSON tool call's schema constrains what CAN be called; a code action
+    can call time.time(), a random source, or anything else non-deterministic
+    just as easily as it calls something pure. This isn't a difference in
+    what's possible in principle (a JSON tool could wrap a non-deterministic
+    function too) — it's a difference in how EASILY it happens by default,
+    demonstrated here by running the same source text twice.
+    """
+    code = "import time\nresult = time.time()\n"
+    ns1: dict = {}
+    exec(code, ns1)
+    ns2: dict = {}
+    exec(code, ns2)
+    return f"{ns1['result']:.6f}", f"{ns2['result']:.6f}"
+
+
 if __name__ == "__main__":
     print("=== 1. Composability under an 8-step budget ===")
     ks = [1, 3, 5, 6, 7, 10, 20]
@@ -190,6 +240,10 @@ if __name__ == "__main__":
             f"({stats['success_rate']:.0%}), avg steps needed = {stats['avg_steps_needed']:.1f}"
         )
 
+    print("\n=== 1b. Does the 8-step snapshot generalize? Sweep the budget itself ===")
+    budget_sweep = sweep_budgets([3, 4, 6, 8, 10, 12, 16, 24], ks)
+    print(render_budget_sweep(budget_sweep))
+
     print("\n=== 2. Tool reuse (statistics.mean, zero registration) ===")
     mean_result = demo_tool_reuse()
     print(f"code action result: {mean_result}")
@@ -200,3 +254,9 @@ if __name__ == "__main__":
     print("First action's real traceback (tail):")
     print("  " + traceback_text.strip().splitlines()[-1])
     print(f"Second action's result after the fix: {fixed_avg}")
+
+    print("\n=== 4. Non-determinism, measured (identical code, two runs) ===")
+    r1, r2 = demo_nondeterminism()
+    print(f"run 1: {r1}")
+    print(f"run 2: {r2}")
+    print(f"identical source, different output: {r1 != r2}")

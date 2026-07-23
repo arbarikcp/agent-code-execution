@@ -64,6 +64,34 @@ claim about success rates on any real benchmark or with any real model; the
 "up to 20% higher success rate" figure above is the one number in this
 document backed by a real, independently published evaluation.
 
+### Does the 8-step snapshot generalize? A full budget sweep
+
+One budget (8) is one point on a curve. `sweep_budgets()` sweeps the budget
+itself from 3 to 24, holding the same task sizes fixed:
+
+```
+budget |  json success rate |  code success rate | max k JSON can fit
+---------------------------------------------------------------------
+     3 |               14% |              100% |                  1
+     4 |               14% |              100% |                  2
+     6 |               29% |              100% |                  4
+     8 |               57% |              100% |                  6
+    10 |               71% |              100% |                  8
+    12 |               86% |              100% |                 10
+    16 |               86% |              100% |                 14
+    24 |              100% |              100% |                 22
+```
+
+Code's success rate is **100% at every budget tested**, including the
+tightest (3 steps) — a code action never needs more than 2 steps regardless
+of task size. JSON's success rate climbs monotonically (14% → 29% → 57% →
+71% → 86% → 100%) as the budget loosens, reaching parity with code only once
+the budget is generous enough to fit every task size in the test set. The
+"max k JSON can fit" column is exactly `budget - 2` at every row — not a
+statistical pattern, a direct algebraic consequence of JSON's `k+2` step
+formula versus code's constant `2`. The original 57%-vs-100% result is one
+point on this line, not a cherry-picked snapshot.
+
 ### Tool reuse (measured)
 
 `demo_tool_reuse()` runs `import statistics; result = round(statistics.mean(values), 2)`
@@ -104,13 +132,26 @@ not something this chapter can independently verify by running code — it is
 reported here as the paper's stated rationale, not as a number this guide
 measured.
 
-## Costs and risks (handoff, not measured here)
+## Costs and risks — non-determinism now measured, not just claimed
 
 Code actions widen the failure surface relative to JSON tool calls:
 
-- **Non-determinism.** A code action can call `time.time()`, use randomness,
-  or depend on execution order in ways a fixed-schema tool call generally
-  can't — harder to reproduce a failing run.
+- **Non-determinism (measured).** `demo_nondeterminism()` executes the exact
+  same source text (`import time; result = time.time()`) twice and compares
+  the results:
+
+  ```
+  run 1: 1784809267.251519
+  run 2: 1784809267.251528
+  identical source, different output: True
+  ```
+
+  Identical code, genuinely different output — not a hypothetical, a
+  one-line reproduction. `exec()` places no constraint on what a code action
+  can call; a JSON tool-calling system's non-determinism is bounded by
+  whatever was actually registered as a tool — if nobody registered a
+  time-reading tool, that specific non-determinism is simply unavailable to
+  the agent, by construction, not by discipline.
 - **Debugging cost.** A JSON tool call's effect is legible from its arguments
   alone; a code action's effect requires reading (or running) the code, as
   the tool-reuse and dynamic-revision demos above illustrate.

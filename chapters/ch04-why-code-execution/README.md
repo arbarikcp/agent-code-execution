@@ -56,8 +56,19 @@ write, 1 final answer) — a code action needs a constant 2. Measured result:
 JSON tool calling succeeds for k ≤ 6 and fails outright for k ≥ 7 (exceeds
 the budget); the code action succeeds at every k tested. Overall: **4/7
 (57%)** for JSON tool calls vs. **7/7 (100%)** for the code action, on this
-toy benchmark, under this step budget — full numbers in
-`code_as_action_rationale.md`.
+toy benchmark, under this step budget.
+
+**Does that 57%-vs-100% gap generalize, or was budget=8 a special case?**
+`sweep_budgets()` answers this directly by sweeping the budget itself from 3
+to 24 (same task sizes, `code_as_action_rationale.md` has the full table).
+Code's success rate is **100% at every single budget tested**, including the
+tightest (3 steps) — its step count never scales with task size at all.
+JSON's success rate climbs monotonically as the budget loosens — 14% → 29%
+→ 57% → 71% → 86% → 100% — reaching parity with code only once the budget is
+generous enough to fit every task size tested. The "largest k JSON can fit"
+is exactly `budget - 2` at every point on this curve, a direct algebraic
+consequence of the two step-cost formulas, not a statistical artifact. The
+original 57%-vs-100% snapshot is one point on this line, not cherry-picked.
 
 **Tool reuse.** `demo_tool_reuse()` runs `statistics.mean` — an ordinary
 stdlib function — inside a code action with zero prior registration, and
@@ -85,12 +96,17 @@ that drives the fix is the interpreter's actual output, not a canned string;
 this is the mechanical seed of Chapter 22's self-debugging loop.
 
 **Costs and risks.** Code actions can do anything the interpreter can do —
-this is the flip side of composability. `code_as_action_rationale.md`
-enumerates non-determinism, debugging cost, and containment burden as the
-three concrete costs, and is explicit that **this guide does not implement
-runtime containment** — that's the sibling guide, *Code Execution
-Sandboxing for AI Agents*, referenced by name per this guide's own
-handoff convention (Part XI).
+this is the flip side of composability. Non-determinism is now MEASURED, not
+just claimed: `demo_nondeterminism()` runs the identical source text
+(`import time; result = time.time()`) twice and gets two different results
+(`1784809267.251519` vs. `1784809267.251528`). Identical code, genuinely
+different output — a JSON tool-calling system's non-determinism is bounded
+by whatever tools were actually registered; if nobody registered a
+time-reading tool, that specific non-determinism is simply unavailable to
+the agent, not merely discouraged. `code_as_action_rationale.md` covers
+debugging cost and containment burden as the other two concrete costs, and
+is explicit that **this guide does not implement runtime containment** —
+that's the sibling guide, *Code Execution Sandboxing for AI Agents*.
 
 ## 6. Minimal Implementation
 
@@ -99,9 +115,13 @@ handoff convention (Part XI).
 - `run_benchmark`, `run_json_tool_solver`, `run_code_action_solver`,
   `summarize_benchmark`, `render_benchmark_table` — the step-budget
   composability benchmark, real execution, real success/failure.
+- `sweep_budgets`, `render_budget_sweep` — sweeps the budget itself (3 to
+  24) to confirm the single-snapshot result generalizes.
 - `demo_tool_reuse`, `HYPOTHETICAL_JSON_TOOL_SCHEMA_FOR_MEAN` — the tool-reuse
   demonstration and its JSON-mode counterfactual.
 - `demo_dynamic_revision` — the real-traceback-drives-real-fix demonstration.
+- `demo_nondeterminism` — runs identical code twice, shows the real output
+  differs.
 
 Run it directly:
 
@@ -134,16 +154,18 @@ Second action's result after the fix: 0.0
 ## 7. Hands-on Lab
 
 `notebooks/ch04_why_code_execution.ipynb` (executed, committed with outputs)
-carries out the chapter's hands-on direction directly: runs the step-budget
-benchmark across all seven k values and prints the comparison table and
-summary, runs the tool-reuse demo alongside its JSON-mode counterfactual
-schema, and runs the dynamic-revision demo showing the real traceback and
-the real fix.
+carries out the chapter's hands-on direction and then goes further: runs the
+original step-budget benchmark, then the full budget sweep (3 to 24) with a
+discussion of why the "max k JSON can fit" column is exactly `budget - 2`,
+then the tool-reuse and dynamic-revision demos, then the non-determinism
+demo with a discussion of why a JSON tool-calling agent can't reproduce the
+same non-determinism unless someone explicitly registers a
+non-deterministic tool.
 
-To extend it yourself: lower `max_steps` from 8 to 4 and rerun — JSON tool
-calling's success rate should drop further (it now fails at k ≥ 3) while the
-code action's stays at 100% for every k tested, since its step count never
-depends on k at all.
+To extend it yourself: add a budget of 2 to the sweep and confirm code's
+success rate stays 100% (its absolute floor — 1 action + 1 final answer) —
+then try budget=1 and see both approaches fail outright, since even a code
+action needs a second turn to state its final answer.
 
 ## 8. Failure Lab
 
@@ -207,53 +229,63 @@ formalizes as structured run tracing.
 | Claim | Evidence in this chapter | Status |
 |---|---|---|
 | Composability reduces steps/improves success under a budget | `run_benchmark`: 100% vs. 57% success, 7 tasks | Measured (own toy benchmark) |
+| That gap holds generally, not just at budget=8 | `sweep_budgets`: monotonic 14%→100% JSON curve across budgets 3-24 | Measured (own toy benchmark) |
 | CodeAct beats alternatives on a real benchmark | Paper abstract: "up to 20% higher success rate," API-Bank, 17 LLMs | Verified citation, not reproduced |
 | Tool reuse needs zero registration | `demo_tool_reuse`: real `statistics.mean` call | Measured |
 | Dynamic revision uses real interpreter feedback | `demo_dynamic_revision`: real traceback → real fix | Measured |
 | Pretraining alignment improves code reliability | CodeAct paper's stated motivation | Cited, not independently measured |
-| Code actions cost more in containment/debugging/determinism | Failure Lab; sandbox-guide handoff | Argued, not benchmarked (out of this guide's scope) |
+| Code actions are genuinely more non-deterministic | `demo_nondeterminism`: identical code, two different real outputs | Measured |
+| Code actions cost more in debugging/containment | Failure Lab; sandbox-guide handoff | Argued, not benchmarked (out of this guide's scope) |
 
 ## 13. Review Questions
 
 1. Why does the step-budget benchmark show a success-rate *gap* (57% vs.
    100%) rather than just a token/turn-count difference like Chapter 2's
    comparison?
-2. What, specifically, makes `demo_tool_reuse`'s code action need "zero
+2. In the budget sweep, why is "max k JSON can fit" always exactly
+   `budget - 2`, and why does code's success rate never depend on the
+   budget at all (down to budget=2)?
+3. What, specifically, makes `demo_tool_reuse`'s code action need "zero
    registration" — what would have to happen for JSON tool calling to call
    the same stdlib function?
-3. In `demo_dynamic_revision`, what part of the second code action was
-   actually informed by the first action's traceback, and how would you show
-   that concretely if the informing model call were real instead of implicit?
-4. Name one context (not the Failure Lab's example) where JSON tool calling
-   would still be preferred despite this chapter's benchmark favoring code
-   actions.
-5. Which of this chapter's five claims (composability, tool reuse,
-   pretraining alignment, dynamic revision, costs/risks) is the *only* one
-   not backed by something this chapter actually ran? Why couldn't it be?
+4. `demo_nondeterminism` shows a JSON tool-calling agent CAN'T introduce the
+   same non-determinism unless a tool exposes it. Is that a limitation of
+   JSON tool calling, or a safety property? Argue both sides.
+5. Which of this chapter's claims (composability, budget generality, tool
+   reuse, pretraining alignment, dynamic revision, non-determinism) is the
+   *only* one not backed by something this chapter actually ran? Why
+   couldn't it be, even in principle, without external data this guide
+   doesn't have access to?
 
 ## 14. Chapter Summary
 
 Code should be the default action space for multi-step, data-touching agent
 loops because composition, reuse, and correction happen inside one action
 instead of being spread across harness-mediated round trips. This chapter
-demonstrated three of its four positive claims with real, runnable evidence:
-composability (100% vs. 57% success under a shared 8-step budget on a toy
-benchmark), tool reuse (an unregistered stdlib call working immediately), and
-dynamic revision (a real traceback driving a real fix) — and cited, without
-independently reproducing, the CodeAct paper's own verified claim of "up to
-20% higher success rate" on a real benchmark across 17 LLMs. The fifth claim,
-alignment with pretraining, is reported as the paper's stated rationale, not
-measured here. The cost side — non-determinism, debugging difficulty, and a
-wider containment surface — is real and is handed off explicitly to the
-sibling sandbox guide rather than addressed in this guide's Parts I–X.
+demonstrated its claims with real, runnable evidence rather than a single
+snapshot: composability, checked not just at one budget but across a full
+sweep (3 to 24 steps), shows JSON's success rate climbing monotonically from
+14% to 100% as the budget loosens while code stays at 100% throughout —
+confirming the original 57%-vs-100% result generalizes rather than being
+cherry-picked; tool reuse (an unregistered stdlib call working immediately);
+dynamic revision (a real traceback driving a real fix); and non-determinism
+(identical source code producing two different real outputs). The chapter
+also cited, without independently reproducing, the CodeAct paper's own
+verified claim of "up to 20% higher success rate" on a real benchmark across
+17 LLMs. One claim, alignment with pretraining, is reported as the paper's
+stated rationale rather than measured, because it concerns training-data
+composition this guide has no way to verify by running code. The remaining
+costs — debugging difficulty and containment burden — are argued, not
+benchmarked, and handed off explicitly to the sibling sandbox guide.
 
 ## 15. Chapter Deliverable
 
 [`code_as_action_rationale.md`](code_as_action_rationale.md) — a written
 rationale for code-as-action, combining the verified CodeAct paper claim with
-this chapter's own benchmark notes (step-budget composability, tool reuse,
-dynamic revision) and an explicit costs/risks section with the sandbox-guide
-handoff.
+this chapter's own benchmark notes (step-budget composability and its
+generalization across a full budget sweep, tool reuse, dynamic revision, and
+measured non-determinism) and an explicit costs/risks section with the
+sandbox-guide handoff.
 
 ## 16. Further Reading
 
