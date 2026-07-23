@@ -7,13 +7,25 @@ chapter (see `CLAUDE.md` → Per-Chapter Workflow).
 
 | Chapter | Title | Status | Notes |
 |---|---|---|---|
-| 01 | What Is an Agent? | done | No backbone code yet — deliverable is a data-driven comparison (`code/systems.py`) + one-page reference. |
-| 02 | Action Spaces: Text, JSON, and Code | done | Still no backbone — deliverable is a measured comparison matrix (`code/action_spaces.py`, real `tiktoken` counts) of free text / JSON tool calls / code actions on one worked task. |
-| 03 | The Reason–Act–Observe Loop | done | Still no backbone — `code/react_vs_codeact.py` runs a real ReAct loop and a real CodeAct loop (scripted model, real execution/observations) over the same task; deliverable is an annotated loop diagram + verified ReAct→PAL→Toolformer→CodeAct lineage (dates checked against arXiv abstract pages). |
-| 04 | Why Code Execution | done | Last pre-backbone chapter. `code/why_code.py` runs a real step-budget benchmark (100% vs. 57% success, own toy task), a tool-reuse demo, and a real-traceback-drives-real-fix demo. Cites CodeAct's verified "up to 20% higher success rate" (API-Bank, 17 LLMs) as an external claim, kept explicitly separate from the chapter's own smaller benchmark. |
-| 05 | A Minimal Code-Executing Agent | done | **Backbone agent v0 built.** `src/backbone_agent/` — generate→extract→execute→observe→repeat, ~40 lines of loop logic, real live model calls via litellm/Groq. Verified 3/3 on hands-on tasks (math, file transform, data stats) against independently computed ground truths. See Backbone State below. |
-| 06 | Interpreters, REPLs, and Kernels | done | `executor.py` gained the `Executor` interface + `SubprocessExecutor` + `KernelExecutor` (real IPython kernel via jupyter_client), alongside Ch5's `InProcessExecutor`. `loop.py::run_agent` takes a pluggable `executor` param, defaults unchanged (confirmed via smoke test). Measured: subprocess ~15-20ms/call but fails cross-call state; kernel ~730ms startup then ~4-8ms/call and correctly persists state. |
+| 01 | What Is an Agent? | done (revised) | No backbone code yet. Autonomy is now DERIVED from 5 `LoopPredicates` booleans (`classify_autonomy()`), not hand-labeled — checked against a hand-reasoned answer key for 6 systems. Two boundary cases stress-test it: `AGENTIC_RAG` (predicates identical to `CODING_AGENT` despite the misleading "RAG" name) and `THERMOSTAT` (identical loop-shape predicates to `CODING_AGENT`, differs only on `policy_is_a_language_model` — proves a closed feedback loop alone isn't sufficient for "agent"). |
+| 02 | Action Spaces: Text, JSON, and Code | done (revised) | Replaced the single k=3 snapshot with: a real free-text parser scoring 4/8 (50%, with a distinct WRONG-not-just-MISSED category); a k=1..30 scaling sweep proving JSON's marginal token cost per file rises monotonically (superlinear, not just "large"); a heterogeneous-task honesty check showing code's token advantage shrinks from 92.8x to 7.3x without uniformity (turn advantage survives at 3.5x). |
+| 03 | The Reason–Act–Observe Loop | done (revised) | Constructed a real failure class: two 6-file ReAct scripts with identical, individually-correct Observations, differing at one Thought's arithmetic — the flawed one finishes confidently wrong. Grounded directly in PAL's verified abstract quote ("logical and arithmetic mistakes in the solution part, even when decomposed correctly") and its verified 15%-absolute GSM8K result. Lineage upgraded to direct quotes for all 4 papers. |
+| 04 | Why Code Execution | done (revised) | Replaced the single-budget (8) snapshot with `sweep_budgets()` across 3-24: JSON's success rate climbs monotonically 14%→100%; code stays 100% at every budget down to 2. Added `demo_nondeterminism()` — identical source code, two real different outputs (measured, not just asserted). |
+| 05 | A Minimal Code-Executing Agent | done (revised) | **Backbone agent v0.** `src/backbone_agent/` — generate→extract→execute→observe→repeat. Beyond the original 3/3 task verification: 3-trial reliability (100% both, identical step counts), a real prompt ablation (one sentence steering toward stdlib: 100%→0% `ModuleNotFoundError` rate, 3→2 steps), and a real `max_steps=1` boundary confirming `StepBudgetExceeded`. Hit and handled Groq's real 12k-TPM rate limit. See Backbone State below. |
+| 06 | Interpreters, REPLs, and Kernels | done (revised) | `executor.py`: `Executor` interface + `SubprocessExecutor` + `KernelExecutor` (real IPython kernel), alongside `InProcessExecutor` — now all three measured together (in-process ~2ms, subprocess ~47ms, kernel ~758ms startup, only kernel passes the state-dependent step). Real amortization sweep (N=1..160) found the actual breakeven at **N≈60** — correcting an earlier unmeasured guess ("a handful of actions") that was wrong by over an order of magnitude. A genuine `while True: pass` against the kernel produces an uncaught `queue.Empty`, a real documented gap left unfixed on purpose. |
 | 07–66 | ... | todo | Not yet reached. |
+
+**Depth revision pass (2026-07-23):** the user reviewed chapters 1-6 and
+flagged them as too shallow — too many "Chapter X will cover this"
+deferrals in place of real depth on each chapter's own content, and
+notebooks that demonstrated once rather than explored. All six were
+revised in place (see the `chN revision:` commits) to add real measurements,
+constructed failure cases, and boundary/honesty checks — including one
+correction of a previously unmeasured, wrong claim (ch06's amortization
+breakeven was guessed as "a handful of actions"; measurement found N≈60).
+This standard — real experiments, minimal forward-referencing, notebooks
+that explore multiple angles rather than demonstrate once — applies to
+every chapter from here forward, not just as a one-time cleanup.
 
 ## Backbone state
 
@@ -43,9 +55,17 @@ chapter (see `CLAUDE.md` → Per-Chapter Workflow).
   - `observation_from_result()` — shared formatting so `loop.py`'s
     observation text is identical regardless of backend.
 - `loop.py::run_agent(task, model=None, max_steps=10, return_trace=False,
-  executor=None)` — `executor` now pluggable, defaults to
-  `InProcessExecutor()` (v0's exact prior behavior; confirmed via the
-  regression smoke test after the refactor). Loop control flow unchanged.
+  executor=None, system_prompt=None)` — `executor` pluggable, defaults to
+  `InProcessExecutor()`; `system_prompt` (added during the depth-revision
+  pass, for Ch5's prompt ablation) defaults to the module-level
+  `SYSTEM_PROMPT`. Both default to v0's exact prior behavior when omitted;
+  confirmed via the regression smoke test after every change. Loop control
+  flow itself unchanged since Chapter 5.
+- `executor.py::KernelExecutor(startup_timeout_s=60.0, execute_timeout_s=30.0)`
+  — `execute_timeout_s` added during the depth-revision pass so Ch6's real
+  kernel-hang failure is reproducible in 2s instead of 30s. `run()` still
+  raises `queue.Empty` uncaught on a timeout — a known, documented gap, not
+  yet fixed (see Ch6's README Failure Lab).
 - `__main__.py` — `python -m backbone_agent "<task>"` CLI entry point, works.
 - Installed editable via `pyproject.toml` (`pip install -e .`), so `import
   backbone_agent` works from any chapter's code from here on.
