@@ -2,110 +2,129 @@
 
 ## 1. Concept
 
-An **action space** is the vocabulary of things an agent's model is allowed to
-emit as an action. Chapter 1 established that an agent is a loop coupling a
-model to an environment through actions and observations; this chapter asks
-*what shape those actions take*. Three dominant shapes exist: free text, JSON
-tool calls, and executable code. The choice is not cosmetic — it determines how
-much a single action can accomplish, how many round trips a task needs, and how
-much of the model's token budget goes to actually doing work versus re-stating
-context.
+An **action space** is the vocabulary of things an agent's model is allowed
+to emit as an action. Three shapes dominate: free text, JSON tool calls, and
+executable code. This chapter doesn't just compare them on one example — it
+measures a scaling *curve* across task size, quantifies free text's
+fragility as a real hit rate, and then deliberately tries to break the
+"code always wins" conclusion with a task shaped to be hard for code. The
+result is a comparison with actual edges, not a foregone conclusion.
 
 ## 2. Why This Matters for Code-Executing Agents
 
-This guide is about the third action space specifically. Before arguing *why*
-code is a good choice (Chapter 4), you need to see what it's being compared
-against and on what axes. This chapter builds the comparison; Chapter 4 builds
-the argument on top of it. Skipping straight to "code is better" without seeing
-the mechanics of *why* — composability, round-trip cost, resent context — would
-make Chapter 4 an assertion instead of a conclusion.
+A single-snapshot comparison ("code wins on this one task") is easy to
+overclaim from. The scaling sweep in this chapter answers a sharper
+question — does code's advantage grow, shrink, or stay constant as tasks
+get bigger? — with a real, monotonically-verified answer. The heterogeneity
+check answers an even sharper one: is the advantage even real once you
+remove the one structural gift (uniformity) the earlier example quietly
+relied on? Both answers are load-bearing for the rest of this guide, which
+commits to code as the default action space starting Chapter 4.
 
 ## 3. Mental Model
 
-Think of each action space as answering two questions differently:
+Two independent axes explain everything measured in this chapter:
 
-1. **How much can one action do?** Free text: whatever a human or fragile
-   parser can extract from prose. JSON tool calls: exactly one predefined
-   operation, with typed arguments. Code: anything the language's control flow
-   and available functions can express — loops, conditionals, composition of
-   many operations.
-2. **Who decides what happens between operations?** Free text and JSON tool
-   calls both hand control back to the harness after every single operation —
-   the harness decides whether to call the model again and with what. Code
-   keeps control *inside* the action until the code block ends — a `for` loop
-   over three files doesn't need to ask the harness's permission between
-   iterations.
+```
+Axis 1 — WHO decides what happens between operations?
+   Free text / JSON: the harness does, after every single operation (a round trip each time)
+   Code:              the action itself does, via real control flow (no round trip between operations)
 
-Question 2 is the mechanical reason code actions need fewer round trips: they
-push composition inside the action instead of outside it.
+Axis 2 — Does the action's SIZE grow with the number of operations it performs?
+   A uniform task (same op, k times):     code compresses into a loop -> size ~constant in k
+   A heterogeneous task (k different ops): code can't compress -> size grows with k, same as JSON's turn count would
+```
+
+Every number in this chapter's measurements is either axis 1 (why code needs
+fewer turns, always) or axis 2 (why code's TOKEN advantage is sometimes
+enormous and sometimes merely large, depending on how compressible the task
+is). Conflating the two axes is exactly how you'd arrive at an overclaim
+like "code always wins by 90x" — that number is real, but it's an axis-2
+result from a maximally uniform task, not a general constant.
 
 ## 4. Architecture (place in the loop / context)
 
-The action space is the format of one edge in Chapter 1's loop: the
-model-emits-an-action edge. It directly shapes the harness built in Part IV
-(Chapter 19, "Parsing and Extracting Actions," is entirely about turning one of
-these three shapes into something executable) and the token economics of Part
-VI (Chapter 36). Chapter 28 ("Tools as Code: Definition and Exposure") picks
-this back up once tools exist to be called from inside a code action.
+The action space is the format of one edge in Chapter 1's loop — the
+model-emits-an-action edge — and this chapter's `LoopPredicates` connection
+is direct: Chapter 1's `model_chooses_the_action` and
+`observation_reenters_model_context` predicates are exactly what's being
+measured here in token/turn terms. An `AUTONOMOUS_LOOP` system (Chapter 1)
+pays the per-turn cost measured in §2 of `comparison_matrix.md` on every
+single iteration — this is why the scaling sweep, not just a single-task
+snapshot, is the number that actually matters for a real long-running agent.
 
 ## 5. Detailed Explanation
 
-**Free-text actions.** The earliest prompting style: the model describes its
-intended action in prose, and a parser (regex, keyword matching, or another
-model call) tries to extract a structured intent from it. `code/action_spaces.py`
-demonstrates the fragility directly — four phrasings of "I'm about to read
-a.txt" (`FREE_TEXT_AMBIGUOUS_VARIANTS`), all valid English, all requiring a
-parser to somehow converge on the same extracted action. Free text was largely
-abandoned for real tool use once structured calling became available, precisely
-because this fragility doesn't improve with better prompting — it's inherent to
-having no schema.
+**Free text, measured.** `naive_parse_read_intent` (in `code/action_spaces.py`)
+is a realistic first-draft parser — a two-keyword list (`read`, `open`) plus
+a filename regex, not an intentionally weak strawman. Run against 8
+phrasings a human parses correctly without hesitation, it scores **4/8
+(50%) correct**, with two distinct failure categories: `MISSED` (no filename
+found — 3 cases, e.g. "Could you check what's in a.txt for me?", where
+"check" isn't a recognized keyword) and `WRONG` (a filename WAS found, but
+the wrong one — 1 case, `'lab notes.txt'` parsed as `'notes.txt'` because the
+regex stops at the first `\w+.\w+` pattern and never sees the space). The
+`WRONG` case is the more important failure mode: it doesn't error, it
+silently acts on the wrong target — see the Failure Lab for why that matters
+more than the raw percentage.
 
-**Structured tool calling (JSON / function calling).** The model is given a
-fixed set of tool schemas (name, description, typed parameters — see
-`TOOL_SCHEMAS` in `code/action_spaces.py`) and constrained to emit one
-call — `{"tool": name, "arguments": {...}}` — per turn. This fixes free text's
-ambiguity: there's exactly one way to call `read_file`. The cost is control:
-the model cannot decide to call three tools in sequence within one action; the
-harness must call the model again after every single tool result, and that
-next call resends the system prompt, the schema, and the growing history.
+**Structured tool calling, made k-sized.** `build_json_tool_call_trace(k)`
+generalizes the original single-task version to any k: k `read_file` calls,
+1 `write_file` call, 1 final answer, `k+2` turns total. Every turn's input
+reconstructs the full context that call needs — system prompt, tool schema,
+and everything resolved so far — because that's what a stateless
+chat-completions call actually resends every turn (Chapter 6 covers why
+there's no memory between calls without a persistent kernel).
 
-**Code actions.** The model emits a block of executable code instead of a
-single call. Because the code has real control flow, one action can perform
-many operations — the worked example's code action does 3 reads, a sum, and a
-write in one block (`build_code_action_trace` in `code/action_spaces.py`).
-Multiple operations that would each cost a JSON round trip cost nothing extra
-inside a single code action, because the language's own semantics (not the
-harness) sequence them.
+**Code actions, made k-sized.** `build_code_action_trace(k)` uses a GENERIC
+loop — `sum(int(read_file(f"f{i}.txt")) for i in range(k))` — instead of
+enumerating k filenames. This one choice is the entire reason code's token
+count stays flat: the action's own text barely changes as k grows, because
+`k` only appears as a number being interpolated into `range(k)`, not as k
+repetitions of similar text.
 
-**Expressiveness comparison.** The comparison matrix
-(`comparison_matrix.md`) lays out control flow, data flow, composition,
-parsing burden, and failure surface side by side. The short version: JSON
-tool calling trades expressiveness for auditability per call; code trades
-per-call auditability for expressiveness and fewer round trips.
+**The scaling sweep (k = 1..30).** JSON's total tokens grow from 891 to
+27,455 (30.8x) as k grows 30x — which looks close to linear from the raw
+ratio alone. It isn't: `marginal_json_token_cost` computes the cost of each
+ADDITIONAL file specifically, and that series — 370, 409, 468, 565, 721,
+974, 1,306 tokens per file — is **strictly increasing at every step
+measured**, confirmed by direct comparison in the code, not eyeballed.
+File #30 costs 3.5x more on its own than file #2 did. Mechanism: every
+already-resolved file's read-and-observation gets resent in the context of
+every LATER turn, so adding file k+1 doesn't just cost file k+1's own
+turn — it lengthens every turn still to come. Code's token count, by
+contrast, measured **exactly 296 at every single k tested** — not
+"roughly flat," identically flat, because the loop's text genuinely doesn't
+depend on k beyond a few digits.
 
-**Cost and step-count implications.** Measured directly on the 3-file-sum
-task (`render_comparison()` in `code/action_spaces.py`, real `tiktoken`
-counts): JSON tool calling took **5 model turns and 1,627 tokens**; the single
-code action took **2 model turns and 305 tokens** — 2.5x the turns and 5.3x
-the tokens for an identical result. Both effects compound as task length
-grows: more steps means more JSON round trips (linear growth) and a longer
-resent history each time (quadratic-ish growth in cumulative input tokens),
-while a code action's turn count stays flat as long as the steps still fit in
-one block.
+**The honesty check — heterogeneity.** Every result above relied on the
+task being UNIFORM (the same operation, k times) — exactly what a `for` loop
+compresses. `build_heterogeneous_json_trace`/`build_heterogeneous_code_trace`
+test a task with three files needing three DIFFERENT operations (uppercase,
+reverse, word-count) — no generic loop possible. Measured: JSON needs 7
+turns / 2,647 tokens; code needs 2 turns / 361 tokens — a 3.5x turn
+advantage and 7.3x token advantage, both real, both smaller than the
+uniform sweep's numbers at comparable task size. The mechanism shifted:
+code's win here is pure BUNDLING (three unrelated operations, zero
+per-operation round trips), not compression — its own action text now
+scales with the number of distinct operations, just like JSON's turn count
+does. This is the honest boundary: code's turn advantage is structural and
+survives heterogeneity; its token advantage is largest specifically when
+uniformity lets it compress, and merely large (not overwhelming) otherwise.
 
 ## 6. Minimal Implementation
 
-`code/action_spaces.py` builds three real traces for the same task (sum three
-files, write the result) and counts real tokens for two of them:
+`code/action_spaces.py`:
 
-- `FREE_TEXT_AMBIGUOUS_VARIANTS` — four phrasings illustrating parse ambiguity.
-- `build_json_tool_call_trace()` — 5 `Turn`s (3 reads, 1 write, 1 final
-  answer), each `Turn.input_text` reconstructing the full context that model
-  call would actually need (system prompt + tool schemas + history so far).
-- `build_code_action_trace()` — 2 `Turn`s (1 code action, 1 final answer).
-- `count_tokens()` — real token counts via `tiktoken`'s `cl100k_base`
-  encoding (a proxy tokenizer, not tied to any specific model).
-- `render_comparison()` — the turns/tokens table.
+- `naive_parse_read_intent`, `FREE_TEXT_VARIANTS`,
+  `evaluate_free_text_parser` — the measured free-text fragility check.
+- `build_json_tool_call_trace(k)`, `build_code_action_trace(k)`,
+  `sweep_k(ks)`, `marginal_json_token_cost(rows)` — the scaling sweep and
+  its superlinearity check.
+- `build_heterogeneous_json_trace`, `build_heterogeneous_code_trace` — the
+  honesty check.
+- `count_tokens` — real token counts via `tiktoken`'s `cl100k_base`
+  encoding.
 
 Run it directly:
 
@@ -114,131 +133,145 @@ source .venv/bin/activate
 python chapters/ch02-action-spaces/code/action_spaces.py
 ```
 
-```
-Action space         |  Turns |  Input tok |  Output tok |  Total tok
----------------------+--------+------------+-------------+-----------
-JSON tool calls      |      5 |       1538 |          89 |       1627
-Single code action   |      2 |        249 |          56 |        305
-```
+Full output (free-text hit rate, the k=1..30 sweep with marginal costs, and
+the heterogeneous comparison) is reproduced in `comparison_matrix.md`.
 
 ## 7. Hands-on Lab
 
-`notebooks/ch02_action_spaces.ipynb` (executed, committed with outputs) walks
-through the chapter's hands-on direction end to end: prints the free-text
-ambiguity examples, prints the JSON tool schema and code-mode system prompt
-side by side, builds both traces, prints the per-turn token breakdown, renders
-the comparison matrix, and computes the turn/token ratios (2.5x / 5.3x).
+`notebooks/ch02_action_spaces.ipynb` (executed, committed with outputs) runs
+all three measurements with full narration: the free-text parser's 50% hit
+rate broken into `CORRECT`/`MISSED`/`WRONG`, the k=1..30 sweep with the
+marginal-cost series and its monotonicity check, and the heterogeneous-task
+honesty check with an explicit discussion of why its ratio differs from the
+uniform sweep's.
 
-To extend it yourself: add a fourth file (`d.txt`) to `FAKE_WORKSPACE` and the
-task, rebuild both traces, and check whether the token-ratio gap widens or
-narrows as the task grows by one step — it should widen, per the "cost and
-step-count implications" argument above.
+To extend it yourself: add a 4th outcome category to
+`evaluate_free_text_parser` — e.g., `RIGHT_FOR_WRONG_REASON`, a case where
+the regex finds the correct filename by accident despite the keyword check
+having failed for the wrong reason — and see if any of the 8 variants (or a
+new one you write) exposes it.
 
 ## 8. Failure Lab
 
-Reproduce the free-text failure mode directly: take
-`FREE_TEXT_AMBIGUOUS_VARIANTS` and write a keyword-matching parser (e.g.
-`if "read" in text and ".txt" in text: extract_filename(text)`) that tries to
-recover the filename from all four. It will work on some, fail or misfire on
-others (e.g. "First, can you get me a.txt?" has no natural-language "read"
-keyword at all), and every fix you add to catch one phrasing risks
-misclassifying a different one. This is not a bug in your parser — it's the
-structural failure mode of an action space with no schema, and it's *why*
-structured tool calling and code actions both exist: they replace guessing at
-intent with a format a parser can handle deterministically (Chapter 19).
+The `WRONG` result from §1 (`'lab notes.txt'` → `'notes.txt'`) is the
+chapter's sharpest failure case, and it's already been run, not left as an
+exercise: a parser that returns `None` fails loudly (the harness knows
+something went wrong and can re-prompt); a parser that returns a
+plausible-but-wrong filename fails silently (the harness has no signal that
+anything is amiss, and proceeds to read/write the wrong file). Reproduce the
+consequence directly: imagine `naive_parse_read_intent`'s output feeding a
+`read_file` call with no validation that the returned filename actually
+matches user intent — the system would silently operate on `notes.txt`
+while believing it satisfied a request about `'lab notes.txt'`. This is a
+strictly worse failure than a crash, and it's why free text is excluded from
+every other comparison in this chapter rather than carried forward as a
+"weaker but usable" third option.
 
 ## 9. Instrumentation (what to log / trace / measure)
 
-For any action space, per turn: input tokens, output tokens, and whether the
-turn was itself an action or a final answer. Summed across a run, these three
-numbers are exactly what `summarize()` computes in `code/action_spaces.py` and
-are the seed of Chapter 36's per-component token accounting and Chapter 27's
-budget tracking. The turn count alone is a useful cheap proxy for latency,
-since each turn is a full model round trip.
+Per turn: input tokens, output tokens, and — specifically for a free-text or
+loosely-structured action space — whether the parser's confidence in its own
+extraction is itself measurable (most naive parsers, including this
+chapter's, have no confidence signal at all; `WRONG` and `CORRECT` are
+indistinguishable from the parser's own output). For a scaling analysis:
+don't log only the cumulative total per run — log the MARGINAL cost of each
+additional step, the way `marginal_json_token_cost` does, since (as §2
+shows) the total can look linear while the marginal cost is clearly
+accelerating.
 
 ## 10. Design Considerations
 
-- **The gap grows with task length, not just task count.** A 3-step task
-  showed a 5.3x token gap; a 10-step task would show a much larger one,
-  because JSON mode's cumulative input tokens grow with the *square* of step
-  count (each turn resends a longer history) while a single code action's
-  turn count can stay flat. Estimate this before choosing an action space for
-  a genuinely long-horizon task.
-- **Auditability is a real cost of code actions, not just a footnote.** A
-  JSON tool call is trivially loggable and gateable per operation
-  (Chapter 25); a code action bundles several effects into one block that
-  either all run or (on error) partially run. Production systems that need
-  per-operation approval gates may deliberately pay the token/turn cost of
-  JSON calling for that property.
-- **Free text should not appear in a production comparison at all** — it's
-  included here only to show why it was abandoned, not as a live option.
+- **A single-task comparison is a weak basis for a general claim.** The
+  original version of this chapter measured k=3 once and reported one
+  ratio; the sweep across k=1..30 is what actually supports a claim about
+  how the advantage *scales*, which is the claim later chapters (4, 27, 36)
+  depend on.
+- **Marginal cost, not cumulative total, reveals the true growth shape.**
+  A 30.8x-for-30x-k ratio is consistent with linear growth on its own; only
+  the strictly-increasing marginal-cost series rules that out. This is a
+  reusable analysis habit, not specific to this task.
+- **Test your own strongest claim's boundary before publishing it.** §3
+  exists because the k=30 sweep's 92.8x number, presented alone, would
+  invite the reader to assume code always wins by that much. It doesn't;
+  7.3x on a heterogeneous task is the more representative number for tasks
+  that aren't perfectly uniform.
 
 ## 11. Common Mistakes
 
-- **Assuming code actions are strictly better because they're cheaper here.**
-  The comparison matrix's "Best fit" row exists because token cost is one
-  axis, not the only one — auditability, environment availability, and trust
-  boundaries matter too (see the "When JSON tool calling is still the right
-  choice" section of `comparison_matrix.md`).
-- **Measuring only marginal tokens, not cumulative.** The real cost of JSON
-  mode isn't turn 5's tokens in isolation — it's that turn 5 has to resend
-  everything turns 1–4 already established. Always sum across the whole trace.
-- **Treating free text as a lightweight middle ground.** It isn't a
-  compromise between JSON and code; it's strictly worse than both on
-  reliability, with none of code's expressiveness benefit.
+- **Generalizing from one task size.** A single k=3 snapshot can't
+  distinguish linear from superlinear growth — only a sweep with a computed
+  marginal-cost series can, as this chapter now does.
+- **Treating "wins" as a single scalar.** Turn-count advantage and
+  token-count advantage behave differently under heterogeneity (§3): the
+  former survives essentially intact, the latter shrinks. Reporting only
+  one of the two hides this.
+- **Trusting a parser's success cases without checking its failure
+  categories.** A 50% hit rate sounds bad; splitting it into `MISSED` vs.
+  `WRONG` shows the more actionable problem is the 1 silently-wrong case,
+  not the 3 loudly-missed ones.
 
 ## 12. Comparisons / Alternatives
 
-See `comparison_matrix.md` for the full matrix (control flow, data flow,
-composition, turns, tokens, parsing burden, failure surface, best fit) across
-all three action spaces, with worked examples and measured numbers for each.
+See `comparison_matrix.md` for the full matrix plus all three measurements
+(free-text hit rate, k=1..30 scaling sweep with marginal costs, and the
+heterogeneous-task honesty check) reproduced with real numbers from this
+session's run.
 
 ## 13. Review Questions
 
-1. Why does a JSON tool-calling turn's input tokens grow every turn, even
-   though the *new* information each turn (one tool result) is small and
-   roughly constant?
-2. In the code action's system prompt, no tool schema is defined at all —
-   why not, and what replaces it?
-3. Rank the three action spaces by "who decides what happens between
-   operations" (harness vs. the action itself), and explain what that ranking
-   predicts about round-trip count.
-4. Give a concrete scenario (not from this chapter) where JSON tool calling's
-   token cost is worth paying despite code actions being cheaper.
-5. If you added a 4th file to the worked task, would you expect the turn-count
-   gap between JSON and code mode to grow by one turn, or by more than one?
-   Why?
+1. Why does the RAW ratio (30.8x tokens for 30x k) understate how fast
+   JSON's cost grows, and what specifically reveals the understatement?
+2. Explain, in one sentence each, the two DIFFERENT mechanisms behind code's
+   win in §2 (the uniform sweep) versus §3 (the heterogeneous task).
+3. Why is the `WRONG` free-text parsing result (`'lab notes.txt'` →
+   `'notes.txt'`) arguably worse than a `MISSED` result, even though both
+   count as failures?
+4. If a task had 100 distinct, unrelated operations (maximally
+   heterogeneous), would you expect code's token-count advantage over JSON
+   to shrink toward 1x, stay around 7x, or something else? Justify it from
+   §3's mechanism, not just intuition.
+5. What would you have to change in `build_json_tool_call_trace` to make
+   its token growth genuinely linear (not superlinear) in k? (Hint: what
+   specifically causes the marginal cost to rise?)
 
 ## 14. Chapter Summary
 
-Three action spaces exist: free text (fragile, no schema, effectively
-abandoned for real tool use), JSON tool calls (one predefined operation per
-model turn, schema-constrained, easy to audit per call), and code actions
-(arbitrary control flow inside one action, composing many operations without
-extra round trips). Measured on an identical 3-read/1-write task, JSON tool
-calling needed 5 turns and 1,627 tokens where a single code action needed 2
-turns and 305 tokens — a 2.5x turn gap and 5.3x token gap that widens as tasks
-grow longer, because code pushes composition inside the action while JSON
-pushes it outside, back to the harness, at the cost of a round trip and a
-resent history each time.
+Three real measurements, not one snapshot: a realistic free-text parser
+scores 50% (4/8) on phrasings a human parses instantly, with its one wrong
+answer (not just missed answers) showing why free text is excluded from
+serious comparison. A k=1..30 scaling sweep shows JSON tool calling's total
+token cost is not merely large but SUPERLINEAR — the marginal cost per
+additional file rises monotonically (370 → 1,306 tokens) — while a
+code action's token cost stays exactly flat (296) for a uniform task, because
+one generic loop compresses arbitrarily many operations into constant-size
+text. A deliberate honesty check on a HETEROGENEOUS task (no generic loop
+possible) confirms code's turn-count advantage is structural and survives
+(3.5x), while its token-count advantage — driven by compression, not
+bundling alone — shrinks from the uniform sweep's 92.8x down to a still-real
+but far more modest 7.3x. The chapter's conclusion is narrower and more
+defensible than "code always wins": code's turn advantage is close to
+unconditional; its token advantage depends on how compressible the task is.
 
 ## 15. Chapter Deliverable
 
-[`comparison_matrix.md`](comparison_matrix.md) — a comparison matrix of the
-three action spaces with worked examples and measured turn/token counts for
-the JSON-tool-calling and code-action traces.
+[`comparison_matrix.md`](comparison_matrix.md) — the full matrix plus all
+three measurements (free-text hit rate, scaling sweep with marginal-cost
+analysis, heterogeneous-task honesty check) with real numbers reproduced
+from this session's run.
 
 ## 16. Further Reading
 
 - Wang et al., *Executable Code Actions Elicit Better LLM Agents* (CodeAct,
-  2024) — the paper Chapter 4 covers directly; its central empirical claim
-  (fewer actions needed, higher success rate, versus JSON-style tool calling)
-  is exactly the turn/token effect this chapter measures on a toy task.
+  2024) — Chapter 4 covers this paper's thesis directly; its empirical claim
+  (fewer actions, higher success versus JSON-style tool calling) is the same
+  turn/token effect this chapter measures directly, including this chapter's
+  finding that the size of the effect is task-dependent.
 - Gao et al., *PAL: Program-Aided Language Models* (2022) — an early
-  demonstration that offloading composition/computation to executable code,
-  rather than doing it in the model's own text, improves reliability; a
-  precursor to the code-action argument.
-- OpenAI and Anthropic's function-calling / tool-use documentation — worth
-  reading directly for how a real JSON tool-calling schema and response
-  format are specified in production APIs, to compare against the simplified
-  `TOOL_SCHEMAS` used in this chapter's worked example.
+  demonstration that offloading composition/computation to executable code
+  improves reliability; a precursor to the code-action argument this chapter
+  measures rather than merely restates.
+- OpenAI's and Anthropic's function-calling / tool-use documentation — worth
+  reading directly for how a production JSON tool-calling schema and
+  response format compare to the simplified `TOOL_SCHEMAS` used here, and
+  whether production schemas' extra fields (strict typing, enum constraints)
+  would change the token-growth curve measured in §2.

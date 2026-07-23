@@ -13,14 +13,17 @@ cells = []
 cells.append(nbf.v4.new_markdown_cell(
 """# Chapter 2 — Action Spaces: Text, JSON, and Code
 
-Hands-on lab: express the same three-step task as (a) JSON tool calls and
-(b) a single code action, then compare turns and tokens, per
-`agent_code_execution_study_guide.md` Chapter 2's hands-on direction.
+Hands-on lab, pushed past the original "compare turns and tokens on one
+3-file task" direction into three real measurements:
 
-Task: files `a.txt`, `b.txt`, `c.txt` each hold one integer; sum them and write
-the result to `total.txt`. Definitions live in
-[`../code/action_spaces.py`](../code/action_spaces.py); token counts below are
-real measurements from `tiktoken`, not asserted numbers."""
+1. A free-text parser's actual hit rate across 8 phrasings (not asserted fragility — measured).
+2. A full scaling sweep, k=1..30, with the MARGINAL token cost per additional
+   file computed directly — enough to actually confirm superlinear growth,
+   not just eyeball a ratio.
+3. An honesty check: does code's advantage survive when the task is
+   heterogeneous (three different operations, no generic loop possible)?
+
+All from [`../code/action_spaces.py`](../code/action_spaces.py)."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -28,128 +31,126 @@ cells.append(nbf.v4.new_code_cell(
 sys.path.insert(0, "../code")
 
 from action_spaces import (
-    FREE_TEXT_AMBIGUOUS_VARIANTS,
-    JSON_SYSTEM_PROMPT,
-    TOOL_SCHEMAS,
-    CODE_SYSTEM_PROMPT,
-    build_json_tool_call_trace,
-    build_code_action_trace,
-    render_comparison,
-    summarize,
+    FREE_TEXT_VARIANTS, evaluate_free_text_parser, naive_parse_read_intent,
+    sweep_k, render_sweep, marginal_json_token_cost,
+    build_heterogeneous_json_trace, build_heterogeneous_code_trace, summarize,
+    JSON_SYSTEM_PROMPT, CODE_SYSTEM_PROMPT,
 )"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 1. Free text — why it's fragile
+"""## 1. Free text — measured, not just illustrated
 
-Four different, equally plausible ways a model might phrase "I'm about to read
-a.txt" in free text. None of these is wrong, but a hand-written parser has to
-anticipate every one of them (and the ones the model will phrase differently
-next time) to reliably extract "call read_file('a.txt')" as the intended
-action. This is the fragility the chapter's subtopic refers to — there is no
-schema, so extraction is guesswork."""
+`naive_parse_read_intent` is a first-draft parser: a two-word keyword list
+(`read`, `open`) plus a filename regex — the kind of thing a developer
+writes on the first pass, not an adversarially weak strawman. Run against 8
+phrasings, tracking three outcomes: `CORRECT`, `MISSED` (no filename found
+at all), and `WRONG` (a filename WAS found, but it's not the one intended —
+a worse failure than missing, because it looks successful)."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""for variant in FREE_TEXT_AMBIGUOUS_VARIANTS:
-    print(f"- {variant!r}")"""
+"""results = evaluate_free_text_parser(FREE_TEXT_VARIANTS)
+for r in results:
+    print(f"[{r['outcome']:7}] {r['text']!r:65} -> got={r['got']!r}")
+
+n_correct = sum(1 for r in results if r["outcome"] == "CORRECT")
+n_missed = sum(1 for r in results if r["outcome"] == "MISSED")
+n_wrong = sum(1 for r in results if r["outcome"] == "WRONG")
+print(f"\\n{n_correct} correct, {n_missed} missed, {n_wrong} wrong -- out of {len(results)} ({n_correct/len(results):.0%} correct)")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 2. JSON tool calling — the schema and one turn
+"""**50% correct, on phrasings a human reads instantly and correctly, 100% of
+the time.** The `WRONG` case (`'lab notes.txt'`) matters more than the raw
+percentage: the parser confidently returns `'notes.txt'` — a plausible,
+well-formed filename that is simply not the file the text named. A harness
+built on this parser wouldn't error out here; it would silently act on the
+wrong file. This is the concrete shape of "fragility": not "sometimes it
+crashes," but "sometimes it's wrong in a way that looks right.\""""
+))
 
-Structured tool calling fixes the fragility above by giving the model a fixed
-vocabulary (`TOOL_SCHEMAS`) and a fixed response shape. Here's the schema for
-the two tools available, and the system prompt that constrains output to
-exactly one JSON tool call per turn."""
+cells.append(nbf.v4.new_markdown_cell(
+"""## 2. Scaling sweep — the full curve, not one snapshot
+
+The original version of this comparison measured exactly one task size
+(k=3 files) and reported one ratio. Here's the same measurement across
+k = 1, 2, 3, 5, 8, 13, 21, 30 — enough points to see the SHAPE of the growth,
+not just one number on it."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""print(JSON_SYSTEM_PROMPT)
-print()
-for schema in TOOL_SCHEMAS:
-    print(schema)"""
+"""rows = sweep_k([1, 2, 3, 5, 8, 13, 21, 30])
+print(render_sweep(rows))"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 3. Code action — the system prompt
-
-Compare that to the code-action system prompt: no JSON schema to define at
-all, because the "interface" is just two Python functions the model already
-knows how to call from having seen millions of function calls in training."""
+"""Code's token count is **exactly flat (296) at every k measured** — the
+generic loop `sum(int(read_file(f"f{i}.txt")) for i in range(k))` doesn't
+grow with k at all; only the digits of `k` itself change. JSON's token count
+grows from 891 to 27,455 — a 30.8x increase for a 30x increase in k, which
+LOOKS roughly linear from the ratio alone. Is it actually linear, or does
+that ratio hide something? Check the MARGINAL cost — how many extra tokens
+each additional file costs, not the cumulative total:"""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""print(CODE_SYSTEM_PROMPT)"""
+"""deltas = marginal_json_token_cost(rows)
+for k, dk, per_file in deltas:
+    print(f"up to k={k:>2}: +{per_file:>6.0f} tokens per additional file (over the last {dk} added)")
+
+is_rising = all(b[2] > a[2] for a, b in zip(deltas, deltas[1:]))
+print(f"\\nMarginal cost strictly increasing at every step measured: {is_rising}")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 4. Building both traces
+"""**The marginal cost per additional file rises monotonically: 370 -> 409 ->
+468 -> 565 -> 721 -> 974 -> 1,306 tokens.** File #30 costs 3.5x more, on
+its own, than file #2 did. This is the real mechanism, made visible instead
+of asserted: every file that's already been read gets RESENT in the context
+of every turn that comes after it (a stateless chat-completions call has no
+memory of its own — Chapter 6 covers why), so adding file k+1 doesn't just
+add file k+1's own read-and-observe cost, it also lengthens every one of the
+turns still to come. The 30.8x-for-30x-k ratio from the raw totals actually
+*understates* the effect, because the fixed prefix (system prompt + tool
+schema, paid once per turn regardless of k) dilutes the ratio at small k
+while the accelerating marginal cost dominates at large k."""
+))
 
-`build_json_tool_call_trace()` reconstructs the task as 5 model turns (read
-a.txt, read b.txt, read c.txt, write total.txt, final answer) — one tool call
-per turn, the realistic minimum for 3 reads + 1 write + 1 final message.
-`build_code_action_trace()` reconstructs it as 2 turns: one code action that
-does all four operations, then a final answer.
+cells.append(nbf.v4.new_markdown_cell(
+"""## 3. Honesty check — does code still win without a generic loop?
 
-Each turn's *input* is the full context that turn's model call would need —
-system prompt + (for JSON) tool schemas + task + everything so far — because
-that's what actually gets billed and actually grows every turn in a stateless
-chat-completions call. This is "cost and step-count implications" made
-concrete instead of asserted."""
+Every code-wins result so far used a UNIFORM task (the same operation,
+repeated k times) — exactly the case a `for` loop compresses best. What
+happens on a HETEROGENEOUS task, where each of three files needs a
+DIFFERENT operation (uppercase, reverse, word-count) and no generic loop is
+possible?"""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""json_trace = build_json_tool_call_trace()
-code_trace = build_code_action_trace()
+"""het_json = summarize(build_heterogeneous_json_trace())
+het_code = summarize(build_heterogeneous_code_trace())
 
-print(f"JSON mode: {len(json_trace)} model turns")
-for t in json_trace:
-    print(f"  - {t.label:<28} input={t.input_tokens:>4} tok  output={t.output_tokens:>3} tok")
-
-print(f"\\nCode mode: {len(code_trace)} model turns")
-for t in code_trace:
-    print(f"  - {t.label:<28} input={t.input_tokens:>4} tok  output={t.output_tokens:>3} tok")"""
+print(f"JSON: {het_json['turns']} turns, {het_json['total_tokens']} tokens")
+print(f"Code: {het_code['turns']} turns, {het_code['total_tokens']} tokens")
+print(f"Turn ratio:  {het_json['turns']/het_code['turns']:.1f}x")
+print(f"Token ratio: {het_json['total_tokens']/het_code['total_tokens']:.1f}x")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 5. The comparison matrix (Chapter Deliverable)
-
-This table is the chapter's deliverable: turns and tokens, same task, two
-action spaces."""
-))
-
-cells.append(nbf.v4.new_code_cell(
-"""print(render_comparison())
-
-json_summary = summarize(json_trace)
-code_summary = summarize(code_trace)
-turn_ratio = json_summary["turns"] / code_summary["turns"]
-token_ratio = json_summary["total_tokens"] / code_summary["total_tokens"]
-print(f"\\nJSON tool calling used {turn_ratio:.1f}x the turns and {token_ratio:.1f}x the tokens "
-      f"of the single code action, for the identical task and identical final result.")"""
-))
-
-cells.append(nbf.v4.new_markdown_cell(
-"""## Why the gap exists
-
-Two compounding effects, visible directly in the per-turn breakdown above:
-
-1. **Composition.** The code action does 3 reads + 1 sum + 1 write in one
-   action because Python's control flow (a generator expression, a function
-   call) *is* the composition mechanism. JSON tool calling has no control flow
-   of its own — every individual operation needs its own round trip because
-   the harness, not the model, decides what runs next between tool calls.
-2. **Resent context.** Every JSON turn resends the system prompt, the full
-   tool schema block, and the growing history of prior calls/results — that's
-   why `input_tokens` climbs turn over turn (249 → 277 → 305 → 333 → 374 in
-   the run above). The code action only ever needs 2 turns, so it only pays
-   that resend cost twice.
-
-Neither effect is specific to *this* task — they compound worse as the number
-of steps grows, which is exactly Chapter 2's "cost and step-count
-implications" subtopic, and exactly why Chapter 4 argues code scales better as
-tasks get longer."""
+"""Code still wins — 3.5x fewer turns, 7.3x fewer tokens — but the MECHANISM
+is different from the scaling sweep above. There, code won because one
+generic loop's SIZE didn't grow with k. Here, the code action's size DOES
+reflect all three bespoke operations (three separate lines, not a loop) —
+its win comes purely from BUNDLING three unrelated operations into one
+action, with no per-operation round trip, not from compression. This is the
+honest boundary of the composability claim: **code's turn-count advantage
+survives heterogeneity (bundling doesn't require uniformity); its
+token-count advantage is largest specifically when the task IS uniform
+enough to compress into a loop, and smaller — though still real here — when
+it isn't.** Claiming "code always wins by 90x" from the k=30 homogeneous
+result alone would have been an overclaim; this task shows a more modest,
+but still decisive, 7.3x."""
 ))
 
 nb['cells'] = cells

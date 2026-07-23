@@ -2,112 +2,137 @@
 
 *Chapter 2 deliverable: a comparison matrix of action spaces with worked examples.*
 
-Task used for the worked example: files `a.txt`, `b.txt`, `c.txt` each hold one
-integer (42, 17, 8); sum them and write the result to `total.txt`. Full traces and
-measurement code: [`code/action_spaces.py`](code/action_spaces.py). Token counts
-are real measurements from `tiktoken`'s `cl100k_base` encoding — a proxy for
-whatever model the backbone agent eventually uses (chosen in Chapter 5 via
-litellm), used here only so the comparison is reproducible rather than asserted.
+Three separate measurements back this matrix, all from
+[`code/action_spaces.py`](code/action_spaces.py) and reproduced exactly as
+run in this session. Token counts use `tiktoken`'s `cl100k_base` encoding —
+a proxy for whatever model the backbone agent eventually uses (chosen in
+Chapter 5 via litellm), used here only so every comparison is reproducible
+rather than asserted.
 
 ## Matrix
 
 | | Free text | JSON tool calling | Code action |
 |---|---|---|---|
-| **Control flow** | None — one sentence of intent per turn | None — the harness decides what runs next between calls | Full (loops, conditionals, generator expressions) inside one action |
-| **Data flow** | Implicit, described in prose | Explicit but manual — each result must round-trip through the model to reach the next call | Explicit and direct — a variable holds the result, no round trip needed |
-| **Composition (this task)** | Not attempted at scale — doesn't compose reliably past one step (see Worked Example 1) | 4 tool calls, 4 round trips (3 reads + 1 write) | 3 reads + 1 sum + 1 write in a single action |
-| **Turns for this task** | N/A (fragile past step 1) | **5** (4 tool calls + 1 final answer) | **2** (1 code action + 1 final answer) |
-| **Total tokens for this task** | N/A | **1,627** (1,538 in / 89 out) | **305** (249 in / 56 out) |
-| **Parsing burden** | High — free-form text, no schema, must guess intent | Low — fixed JSON schema, easy to validate | Low — a fenced code block, but validating *correctness* requires running it |
-| **Failure surface** | Misparsed intent | Malformed JSON, wrong tool name/args | Syntax errors, runtime exceptions, hallucinated APIs (Ch 46) |
-| **Best fit** | Prototyping only; not used in production agents | A small, fixed, low-composition tool surface where auditability per call matters | Multi-step, stateful, or data-heavy tasks where composition saves round trips |
+| **Control flow** | None | None — the harness decides what runs next between calls | Full (loops, conditionals) inside one action |
+| **Data flow** | Implicit, described in prose | Explicit but manual — every result round-trips through the model | Explicit and direct — a variable holds the result |
+| **Growth with task size k (measured)** | N/A — doesn't scale at all (see §1) | Turns: `k+2`, linear. Tokens: **superlinear** — marginal cost per file rises monotonically (see §2) | Turns: constant (2). Tokens: **constant (296)** for a uniform task (see §2) |
+| **Growth on a heterogeneous task (measured)** | N/A | 7 turns, 2,647 tokens (see §3) | 2 turns, 361 tokens — advantage survives, smaller than the uniform case (see §3) |
+| **Parsing burden (measured)** | High — a reasonable first-draft parser scores 50% (see §1) | Low — fixed JSON schema | Low — a fenced code block, but correctness still requires running it |
+| **Failure surface** | Silent misparsing (looks correct, isn't) | Malformed JSON, wrong tool name/args | Syntax errors, runtime exceptions, hallucinated APIs (Ch 46) |
+| **Best fit** | Prototyping only | Small, fixed, low-composition, high-auditability tool surfaces | Multi-step, stateful, or data-heavy tasks |
 
-## Worked Example 1 — Free text (fragility)
+## §1. Free text — measured fragility, not asserted
 
-Four equally plausible ways a model might express "I'm about to read a.txt":
+`naive_parse_read_intent` — a realistic first-draft parser (keywords `read`,
+`open`, plus a filename regex) — run against 8 phrasings a human parses
+correctly without a second thought:
 
 ```
-- "I should start by reading the contents of a.txt so I know the first number."
-- "Let's open a.txt and see what's inside."
-- "First, can you get me a.txt?"
-- "Read: a.txt"
+[CORRECT] 'I should start by reading the contents of a.txt so I know the first number.' -> got='a.txt'
+[CORRECT] "Let's open a.txt and see what's inside."                         -> got='a.txt'
+[MISSED ] 'First, can you get me a.txt?'                                    -> got=None
+[CORRECT] 'Read: a.txt'                                                     -> got='a.txt'
+[CORRECT] "I'll read the file called a.txt now."                            -> got='a.txt'
+[MISSED ] "Could you check what's in a.txt for me?"                         -> got=None
+[MISSED ] 'Peek into a.txt quickly.'                                        -> got=None
+[WRONG  ] "Could you read the file named 'lab notes.txt'?"                  -> got='notes.txt'
+
+4/8 correct (50%)
 ```
 
-A hand-written parser must anticipate every phrasing to reliably extract the
-same action. There's no schema constraining the model's output, so composing
-this into a 4-step task (3 reads, 1 write) multiplies the ambiguity rather than
-resolving it — which is why free text isn't carried through the rest of this
-comparison as a serious contender.
+The `WRONG` result matters more than the 50% headline: the parser doesn't
+fail loudly on `'lab notes.txt'` — it confidently returns `'notes.txt'`, a
+plausible, well-formed, WRONG filename. A harness built on this parser
+wouldn't error here; it would silently act on the wrong file. That's the
+real shape of free-text fragility: not crashes, but confident wrongness.
 
-## Worked Example 2 — JSON tool calling (5 turns, 1,627 tokens)
+## §2. Scaling sweep — the curve, not a snapshot
 
-Tool schema (both tools):
+Measured across k = 1, 2, 3, 5, 8, 13, 21, 30 files (sum-k-files task):
 
-```json
-{"name": "read_file", "description": "Read the entire contents of a text file in the workspace.",
- "parameters": {"type": "object", "properties": {"path": {"type": "string", "...": "..."}}, "required": ["path"]}}
-{"name": "write_file", "description": "Write text content to a file in the workspace, overwriting it if it exists.",
- "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}
+```
+  k | json turns | json tokens | code turns | code tokens | token ratio
+-----------------------------------------------------------------------
+  1 |          3 |         891 |          2 |         296 |        3.0x
+  2 |          4 |        1261 |          2 |         296 |        4.3x
+  3 |          5 |        1670 |          2 |         296 |        5.6x
+  5 |          7 |        2605 |          2 |         296 |        8.8x
+  8 |         10 |        4300 |          2 |         296 |       14.5x
+ 13 |         15 |        7905 |          2 |         296 |       26.7x
+ 21 |         23 |       15701 |          2 |         296 |       53.0x
+ 30 |         32 |       27455 |          2 |         296 |       92.8x
 ```
 
-Per-turn breakdown (measured):
+Code's token count is **exactly flat (296) at every k** — a generic
+`sum(... for i in range(k))` loop doesn't grow with k, only its digits do.
+JSON's token count grows 30.8x for a 30x growth in k — which looks roughly
+linear from the raw ratio. It isn't. The **marginal** cost per additional
+file — not the cumulative total — is what reveals the real shape:
 
-| Turn | Action | Input tokens | Output tokens |
-|---|---|---|---|
-| 1 | `read_file(path="a.txt")` | 249 | 17 |
-| 2 | `read_file(path="b.txt")` | 277 | 17 |
-| 3 | `read_file(path="c.txt")` | 305 | 17 |
-| 4 | `write_file(path="total.txt", content="67")` | 333 | 23 |
-| 5 | final answer (plain text) | 374 | 15 |
-| | **Total** | **1,538** | **89** |
+```
+up to k= 2: +   370 tokens per additional file
+up to k= 3: +   409 tokens per additional file
+up to k= 5: +   468 tokens per additional file
+up to k= 8: +   565 tokens per additional file
+up to k=13: +   721 tokens per additional file
+up to k=21: +   974 tokens per additional file
+up to k=30: +  1306 tokens per additional file
 
-Input tokens climb every turn (249 → 277 → 305 → 333 → 374) because a stateless
-tool-calling call resends the system prompt, the full tool schema, and the
-growing history on every single turn.
-
-## Worked Example 3 — Code action (2 turns, 305 tokens)
-
-```python
-total = sum(int(read_file(f).strip()) for f in ["a.txt", "b.txt", "c.txt"])
-write_file("total.txt", str(total))
-print(total)
+Strictly increasing at every step measured: True
 ```
 
-| Turn | Action | Input tokens | Output tokens |
-|---|---|---|---|
-| 1 | the code block above | 99 | 41 |
-| 2 | final answer (plain text) | 150 | 15 |
-| | **Total** | **249** | **56** |
+File #30 costs 3.5x more, on its own, than file #2 did — the marginal cost
+is **monotonically increasing**, confirming superlinear (not linear) growth.
+The mechanism: a stateless call resends the full history every turn, so
+adding file k+1 doesn't just add its own read-and-observe cost — it also
+lengthens every turn still to come. The raw 30.8x total-growth ratio
+understates this, because a large fixed prefix (system prompt + tool
+schema) dilutes the ratio at small k while the accelerating marginal cost
+dominates at large k.
 
-One action performs all three reads, the sum, and the write — no tool schema
-needed at all, because the "interface" is two ordinary Python functions the
-model already knows how to call.
+## §3. Honesty check — does the advantage survive heterogeneity?
 
-## Headline numbers
+Every result above used a UNIFORM task (the same operation, k times) —
+exactly what a `for` loop compresses best. On a HETEROGENEOUS task (three
+files, three DIFFERENT operations — uppercase, reverse, word-count — no
+generic loop possible):
 
-For this identical 3-read/1-write task, with an identical final result:
+```
+JSON: 7 turns, 2647 tokens
+Code: 2 turns, 361 tokens
+Turn ratio:  3.5x
+Token ratio: 7.3x
+```
 
-- **Turns:** JSON tool calling used **2.5x** as many model turns as the code action (5 vs. 2).
-- **Tokens:** JSON tool calling used **5.3x** as many total tokens as the code action (1,627 vs. 305).
+Code still wins, but the mechanism changed: in §2, code won because one
+generic loop's SIZE didn't grow with k (compression). Here, the code
+action's size DOES reflect all three bespoke operations — its win comes
+purely from BUNDLING three unrelated operations into one action, with zero
+per-operation round trips, not from compression. **Code's turn-count
+advantage survives heterogeneity; its token-count advantage is largest when
+the task is uniform enough to compress, and smaller — though still
+real (7.3x here) — when it isn't.** Claiming "code always wins by ~90x"
+from §2's k=30 result alone would have been an overclaim this section
+exists specifically to correct.
 
 ## When JSON tool calling is still the right choice
 
-This comparison is not an argument that code actions always win:
+Not just when tasks are small — the measurements above are specifically
+about tasks with real composition or scale. JSON tool calling is still the
+right choice when:
 
-- **Small, fixed, low-composition tool surfaces.** If a task genuinely needs
-  one or two isolated calls with no data flowing between them, JSON's fixed
-  schema is easier to validate and audit per call than a code block is.
-- **Auditability and approval gates.** A single structured call is trivial to
-  inspect, log, and gate behind human approval before it runs (Chapter 25).
-  A code action bundles several effects into one block, which is harder to
-  gate at the level of an individual operation.
-- **No code-execution environment available.** If there's no sandboxed
-  interpreter to run code in, JSON tool calling may be the only option
-  regardless of its token cost.
-- **Untrusted or adversarial contexts.** Structured calls constrain the
-  action space to exactly the tools you defined; code widens the attack
-  surface (Chapter 62) in exchange for expressiveness.
+- **Auditability matters more than efficiency.** A single structured call is
+  trivial to inspect, log, and gate behind human approval (Chapter 25) at
+  the level of one operation; a code action bundles several effects into one
+  block that either all run or (on error) partially run.
+- **The task is genuinely small AND fixed.** §2's flat 296-token code cost
+  only pays off once there's more than one or two operations to bundle —
+  for a true one-shot call, the code action's own fixed overhead (importing,
+  structuring output) can exceed a single JSON call's cost.
+- **No code-execution environment is available**, or the trust boundary
+  doesn't allow arbitrary code (Chapter 62).
 
-The rest of this guide is built around code actions because most of the tasks
-it targets are multi-step and data-heavy — exactly the regime where this
-matrix shows code actions winning by the widest margin.
+The rest of this guide is built around code actions because most of its
+target tasks are multi-step and data-heavy — exactly the regime §2 and §3
+both show code actions winning in, honestly bounded by §3's finding that the
+*margin* depends on how compressible the task actually is.
