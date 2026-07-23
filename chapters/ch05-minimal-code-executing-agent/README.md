@@ -53,13 +53,16 @@ time with a live model:
   cycle.
 - **Action space** → `parsing.py::extract_code`, one fenced code block per
   turn (Chapter 2's "code action" made concrete).
-- **Environment** → `executor.py::execute_code`, in-process `exec()` — the
-  simplest of the backends Chapter 6 will compare.
+- **Environment** → `executor.py`'s in-process `exec()` backend — the
+  simplest of the backends this file later grows to support.
 
-Chapter 6 replaces "environment" with a real comparison of execution
-backends; Chapter 7 makes execution stateful; Chapter 8 replaces "stdout
-only" with rich observation capture. None of those chapters restart this
-loop — they edit these same four files.
+Note (updated after Chapter 6): `executor.py` no longer exposes a bare
+`execute_code` function as its primary interface — it now exposes an
+`Executor` class hierarchy (`InProcessExecutor` wraps this chapter's exact
+original behavior). `run_agent` gained an `executor` parameter but keeps its
+default behavior identical to what's described in this chapter. This
+README describes v0 as it was at the end of Chapter 5, on purpose — see
+Chapter 6's own README for the current shape.
 
 ## 5. Detailed Explanation
 
@@ -76,12 +79,11 @@ block per turn to act, plain text with no code block to finish.
 signal. This is deliberately the simplest thing that could work; Chapter 19
 handles multiple blocks, malformed fencing, and mixed reasoning/action.
 
-**Execution.** `executor.py::execute_code` runs the extracted code via
-`exec()` in a namespace dict, with `contextlib.redirect_stdout` capturing
-printed output. On an exception, it returns `traceback.format_exc()` instead
-of raising — the traceback itself becomes the next Observation, which is
-exactly what let the agent recover from the real `ModuleNotFoundError`s
-documented below.
+**Execution.** v0's executor runs the extracted code via `exec()` in a
+namespace dict, with `contextlib.redirect_stdout` capturing printed output.
+On an exception, it captures `traceback.format_exc()` instead of raising —
+the traceback itself becomes the next Observation, which is exactly what let
+the agent recover from the real `ModuleNotFoundError`s documented below.
 
 **Observation formatting.** Minimal: the executor's return string (stdout or
 traceback) is wrapped as `f"Observation:\n{observation}"` and appended as a
@@ -109,8 +111,8 @@ possible agent, not as a later add-on.
 
 - `model.py` — `call_model(messages, model=None)`, thin litellm wrapper.
 - `parsing.py` — `extract_code(text)`, one regex.
-- `executor.py` — `execute_code(code, namespace=None)`, `exec()` + stdout/
-  traceback capture.
+- `executor.py` — `exec()` + stdout/traceback capture (as of Chapter 5;
+  reshaped into the `Executor` interface in Chapter 6, described there).
 - `loop.py` — `run_agent(task, model=None, max_steps=10, return_trace=False)`,
   the loop itself, plus `SYSTEM_PROMPT`.
 - `__main__.py` — `python -m backbone_agent "<task>"` CLI entry point.
@@ -134,18 +136,34 @@ The result of 17 * 23 is indeed 391.
 
 `notebooks/ch05_minimal_agent.ipynb` (executed, committed with outputs, real
 live model calls) runs a minimal trace first, then the chapter's required
-three tasks via `code/three_tasks_demo.py`: a math problem (sum of the first
-20 primes), a file transform (average a real CSV column, write a real file),
-and an API-free data task (mean/median/population stdev of an inline list).
-Every result is checked against a ground truth computed independently of the
-agent — **3/3 tasks solved correctly** in the run committed here. Full
-transcripts, including the real `ModuleNotFoundError` recoveries, are in the
-notebook and in `backbone_v0_notes.md`.
+three tasks via `code/three_tasks_demo.py` — a math problem, a file
+transform, an API-free data task, all **3/3 solved correctly** against
+independently computed ground truths — and then three deeper measurements
+via `code/reliability_and_ablation.py`:
 
-To extend it yourself: lower `max_steps` to 1 and rerun the file-transform
-task — since that task empirically needs 2 turns (the `pandas` miss, then the
-stdlib fix), it should now raise `StepBudgetExceeded` instead of completing,
-letting you see the hard ceiling fire for real.
+1. **Multi-trial reliability**: the math and data-stats tasks run 3 times
+   each, live. Result: 3/3 (100%) for both, with identical step counts
+   every trial — established by running the trials, not assumed from one run.
+2. **A prompt ablation**: the file-transform task, A/B'd 3 live trials per
+   variant between the original `SYSTEM_PROMPT` and a one-sentence
+   stdlib-steered variant. Result: the default prompt hit
+   `ModuleNotFoundError` on **3/3 trials** (3 steps every time); the
+   steered prompt hit it on **0/3 trials** (2 steps every time) — both
+   100% correct, but the steered prompt is strictly more efficient, measured
+   directly rather than assumed from the one earlier `pandas` miss.
+3. **A real step-budget boundary**: `run_agent(task, max_steps=1)` on the
+   file-transform task raises `StepBudgetExceeded` for real
+   (`"no final answer within 1 steps"`), confirming rather than assuming
+   the 2-turn minimum.
+
+Full transcripts and numbers for all of this are in the notebook and in
+`backbone_v0_notes.md`.
+
+To extend it yourself: rerun the prompt ablation with `n_trials=8` per group
+instead of 3 (pacing/backoff for Groq's rate limit is already handled by
+`_with_backoff` in `reliability_and_ablation.py`) and see whether the 100%
+vs. 0% `ModuleNotFoundError` gap holds at a larger sample, or whether 3
+trials happened to be unusually clean on one side.
 
 ## 8. Failure Lab
 
@@ -192,12 +210,18 @@ run succeeded or (via `StepBudgetExceeded`) failed to terminate.
   ground truth, not the agent's stated number — this is a habit worth keeping
   for every later chapter's evaluation too (Chapter 58 formalizes it).
 - **Treating a `ModuleNotFoundError` as a bug in the harness.** It isn't —
-  `execute_code` correctly caught it and returned it as an Observation; the
+  the executor correctly caught it and returned it as an Observation; the
   "failure" was entirely the model's first library choice, and the loop's
   design is what made the recovery free.
 - **Forgetting `return_trace` exists and trying to reconstruct a run's steps
   from just the final answer.** The final answer alone (the normal
   `run_agent` return value) discards everything needed to debug a run.
+- **Trusting one run's `ModuleNotFoundError` as representative without
+  re-measuring.** The original chapter observed the miss on 2 of 3 tasks in
+  one pass; only the prompt ablation's 3-trials-per-arm measurement (100%
+  vs. 0%) turned that anecdote into something you could act on with
+  confidence — e.g., actually adding the stdlib-steering sentence to
+  production prompts.
 
 ## 12. Comparisons / Alternatives
 
@@ -223,9 +247,13 @@ run succeeded or (via `StepBudgetExceeded`) failed to terminate.
 4. Why is verifying task success against an independently computed value
    (rather than the agent's stated answer) especially important for a chapter
    whose whole point is "trust but verify" methodology?
-5. Name one thing `execute_code` does that a subprocess-based executor
-   (Chapter 6) would have to do differently, and why that difference matters
-   for isolation.
+5. The prompt ablation ran only 3 trials per arm. What result would make you
+   suspicious that 3 trials wasn't enough to trust the 100%-vs-0%
+   `ModuleNotFoundError` gap, and what would you do about it?
+6. `run_agent(task, max_steps=1)` reliably raises `StepBudgetExceeded` on the
+   file-transform task. Would you expect the SAME to be true for the
+   trivial `17 * 23` task from Section 1? Why or why not — check against
+   that task's own step count from the notebook before answering.
 
 ## 14. Chapter Summary
 
@@ -234,14 +262,22 @@ execute it for real, observe the real result, repeat until the model stops
 emitting code — built on a thin litellm interface (default
 `groq/llama-3.3-70b-versatile`, configurable via `BACKBONE_MODEL`) so no
 later chapter is locked to one provider. Verified on three real hands-on
-tasks (a math problem, a file transform, an API-free data task) against
-independently computed ground truths, all three solved correctly. The first
-real failure — the model reaching for uninstalled `pandas`/`numpy` — happened
-organically during that verification and self-corrected for free, because
-the loop already threads real tracebacks back as Observations. Everything
-this v0 deliberately doesn't do yet (state, rich output, pluggable backends,
-robust parsing, real budgets, containment) is enumerated in
-`backbone_v0_notes.md` as the explicit target list for Chapters 6 onward.
+tasks against independently computed ground truths, all three solved
+correctly, then pushed further: a 3-trial reliability check (100% for both
+math and stats tasks, identical step counts every time) established
+consistency rather than assuming it from one run; a 3-trials-per-arm prompt
+ablation showed a single added sentence steering the model toward the
+standard library eliminated a real `ModuleNotFoundError` entirely (100% to
+0%) while cutting the task's step count from 3 to 2 every time; and a real
+`max_steps=1` run confirmed `StepBudgetExceeded` fires exactly when the
+2-turn minimum can't be met. The first real failure — the model reaching for
+uninstalled `pandas`/`numpy` — happened organically during verification and
+self-corrected for free, because the loop already threads real tracebacks
+back as Observations; the ablation then turned that anecdote into a measured,
+actionable prompting result. Everything this v0 deliberately doesn't do yet
+(state, rich output, pluggable backends, robust parsing, real budgets,
+containment) is enumerated in `backbone_v0_notes.md` as the explicit target
+list for Chapters 6 onward.
 
 ## 15. Chapter Deliverable
 

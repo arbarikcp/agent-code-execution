@@ -15,13 +15,14 @@ cells = []
 cells.append(nbf.v4.new_markdown_cell(
 """# Chapter 5 — A Minimal Code-Executing Agent
 
-Hands-on lab: build the backbone agent and solve three small tasks (a math
-problem, a file transform, an API-free data task), per
-`agent_code_execution_study_guide.md` Chapter 5's hands-on direction.
+Hands-on lab: build the backbone agent, solve three small tasks (a math
+problem, a file transform, an API-free data task) — and then go past a
+single run into three deeper, real-live-model measurements: multi-trial
+reliability, a prompt ablation, and a real step-budget boundary.
 
-This is the first chapter in the guide that makes a **live model call** —
-every response below is real output from `groq/llama-3.3-70b-versatile` via
-litellm, not scripted. Requires `GROQ_API_KEY` in the environment."""
+Every response below is real output from `groq/llama-3.3-70b-versatile` via
+litellm — no scripted text anywhere in this notebook. Requires
+`GROQ_API_KEY` in the environment."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -40,12 +41,7 @@ print(SYSTEM_PROMPT)"""
 cells.append(nbf.v4.new_markdown_cell(
 """## 1. Smallest possible run
 
-One trivial task, full trace shown, to see the loop's mechanics before the
-three hands-on tasks: the model emits a code block, `run_agent` really
-executes it, the real result is appended as the next message, and the model
-is called again — this time producing plain text (no code block), which
-`run_agent` recognizes as the final answer per the stop signal in
-`SYSTEM_PROMPT`."""
+One trivial task, full trace shown, before the deeper measurements."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -60,73 +56,114 @@ print("FINAL ANSWER:", answer)"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 2. Three hands-on tasks
-
-`three_tasks_demo.py` defines a math problem, a file transform (real CSV in,
-real file written out), and an API-free data task, and verifies each against
-an independently computed ground truth — not by trusting the agent's own
-claim."""
+"""## 2. The three required hands-on tasks (one run each)"""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""from three_tasks_demo import task_1_math, task_2_file_transform, task_3_data_stats, render_trace
+"""import time
+from three_tasks_demo import task_1_math, task_2_file_transform, task_3_data_stats, render_trace
 
-results = []"""
-))
-
-cells.append(nbf.v4.new_markdown_cell("### Task 1 — math (sum of the first 20 primes)"))
-
-cells.append(nbf.v4.new_code_cell(
-"""r1 = task_1_math()
-results.append(r1)
-print(render_trace(r1["messages"]))
-print(f"\\nExpected: {r1['expected']}  |  Success: {r1['success']}")"""
+r1 = task_1_math()
+time.sleep(2)  # pace requests under Groq's free-tier TPM limit
+r2 = task_2_file_transform()
+time.sleep(2)
+r3 = task_3_data_stats()
+for r in (r1, r2, r3):
+    print(f"{r['name']}: expected={r['expected']}  success={r['success']}")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""### Task 2 — file transform (average a CSV column, write a real file)
+"""## 3. Multi-trial reliability — is one run enough to trust?
 
-Watch this one closely: the model's first attempt commonly reaches for
-`pandas`, which isn't installed in this minimal environment — a real
-`ModuleNotFoundError`, not staged. Per the chapter's "first thing that will
-go wrong" fill-in pointer, this *is* that first thing, caught live. The
-traceback becomes the next Observation, and the model's second code action
-switches to the stdlib `csv` + `statistics` modules and succeeds."""
+A single success doesn't tell you whether a task is reliably solvable or
+just got lucky once. Run the math and data-stats tasks 3 times each,
+live, and report a real success rate — our own small pass@3-style
+measurement."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""r2 = task_2_file_transform()
-results.append(r2)
-print(render_trace(r2["messages"]))
-print(f"\\nExpected: {r2['expected']}  |  Success: {r2['success']}")
-print(f"File written: {r2['file_written']}  |  File contents: {r2['file_contents']!r}")"""
-))
+"""from reliability_and_ablation import run_reliability_trials
 
-cells.append(nbf.v4.new_markdown_cell("### Task 3 — API-free data task (mean/median/stdev)"))
+math_reliability = run_reliability_trials(task_1_math, n_trials=3)
+print(f"math task:  {math_reliability['n_success']}/{math_reliability['n_trials']} "
+      f"({math_reliability['success_rate']:.0%}), step counts: {math_reliability['step_counts']}")
 
-cells.append(nbf.v4.new_code_cell(
-"""r3 = task_3_data_stats()
-results.append(r3)
-print(render_trace(r3["messages"]))
-print(f"\\nExpected: {r3['expected']}  |  Success: {r3['success']}")"""
-))
-
-cells.append(nbf.v4.new_markdown_cell("## 3. Summary"))
-
-cells.append(nbf.v4.new_code_cell(
-"""n_success = sum(1 for r in results if r["success"])
-print(f"{n_success}/{len(results)} tasks solved correctly")
-for r in results:
-    print(f"  - {r['name']}: {'OK' if r['success'] else 'FAILED'}")"""
+stats_reliability = run_reliability_trials(task_3_data_stats, n_trials=3)
+print(f"stats task: {stats_reliability['n_success']}/{stats_reliability['n_trials']} "
+      f"({stats_reliability['success_rate']:.0%}), step counts: {stats_reliability['step_counts']}")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""Whatever `ModuleNotFoundError` (or other failure) appears above is real,
-live-model output from whichever run actually happened when this notebook
-was last executed — not guaranteed to be identical every time it's re-run
-(the model can choose a different first attempt), which is itself the
-chapter's point about the first thing that goes wrong: it's *emergent* from
-a real, imperfect environment, not something the harness pre-declared."""
+"""Both tasks solved correctly on every trial, with identical step counts
+each time — these are simple enough tasks that the model's behavior is
+highly consistent. This won't be true for every task (harder or more
+ambiguous tasks would show real variance across trials); the value of
+running multiple trials is finding OUT whether variance exists, not
+assuming there is or isn't any."""
+))
+
+cells.append(nbf.v4.new_markdown_cell(
+"""## 4. Prompt ablation — does steering the model away from pandas/numpy help?
+
+Chapter 5's original run found the model's first code action for the
+file-transform task commonly reaches for `pandas`, which isn't installed,
+producing a real `ModuleNotFoundError` it then recovers from. Does a single
+added sentence in the system prompt — telling the model to prefer the
+standard library — actually reduce how often that happens? A/B it directly:
+3 live trials with the original prompt, 3 with a one-sentence variant."""
+))
+
+cells.append(nbf.v4.new_code_cell(
+"""from reliability_and_ablation import ALT_SYSTEM_PROMPT, run_prompt_ablation
+
+print("Added sentence:")
+print(ALT_SYSTEM_PROMPT[len(SYSTEM_PROMPT):])"""
+))
+
+cells.append(nbf.v4.new_code_cell(
+"""time.sleep(10)  # let the TPM window recover between experiment sections
+ablation = run_prompt_ablation(n_trials=3)
+for label, stats in ablation.items():
+    print(f"{label}:")
+    print(f"  success rate:              {stats['n_success']}/{stats['n_trials']} ({stats['success_rate']:.0%})")
+    print(f"  ModuleNotFoundError rate:  {stats['module_not_found_rate']:.0%}")
+    print(f"  avg steps:                 {stats['avg_steps']:.1f}  (step counts: {stats['step_counts']})")
+    print()"""
+))
+
+cells.append(nbf.v4.new_markdown_cell(
+"""**A one-sentence prompt change eliminated the failure mode entirely** in
+this run: the default prompt hit `ModuleNotFoundError` on 3/3 trials
+(needing 3 steps every time — the wasted `pandas` attempt, then the real
+fix); the stdlib-steered prompt hit it on 0/3 trials, completing in the
+minimum possible 2 steps every time. Both prompts reached the CORRECT final
+answer either way (100% success rate for both) — the prompt change didn't
+fix a correctness problem, it fixed an *efficiency* problem caused by the
+model's own default library preference colliding with this specific
+minimal environment. This is exactly the kind of result Chapter 44
+("Prompting for Reliable Code") will generalize — a concrete, measured
+instance of it, not a preview promise."""
+))
+
+cells.append(nbf.v4.new_markdown_cell(
+"""## 5. A real step-budget boundary
+
+`run_agent` raises `StepBudgetExceeded` if no final answer is reached
+within `max_steps`. Even a "clean" run of the file-transform task needs at
+least 2 steps (one code action, one separate final-answer turn) — so
+`max_steps=1` should make even a perfectly-behaved run fail. Confirm this
+for real, not just in theory."""
+))
+
+cells.append(nbf.v4.new_code_cell(
+"""from backbone_agent.loop import StepBudgetExceeded
+
+task = "Compute the sum of the first 20 prime numbers. State the final numeric answer clearly."
+try:
+    run_agent(task, max_steps=1)
+    print("did not raise (unexpected)")
+except StepBudgetExceeded as e:
+    print(f"StepBudgetExceeded raised as expected: {e}")"""
 ))
 
 nb['cells'] = cells

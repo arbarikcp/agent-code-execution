@@ -39,6 +39,7 @@ def run_agent(
     max_steps: int = 10,
     return_trace: bool = False,
     executor: Executor | None = None,
+    system_prompt: str | None = None,
 ) -> str | tuple[str, list[dict]]:
     """Run the backbone loop on `task`; return the model's final plain-text answer.
 
@@ -54,12 +55,16 @@ def run_agent(
     can be passed in; the loop's control flow doesn't change either way, which
     is the entire point of the `Executor` interface.
 
+    `system_prompt` defaults to the module-level `SYSTEM_PROMPT` — pass a
+    different one to A/B two prompt designs against the same task without
+    forking the loop (Chapter 5's prompt-ablation demo uses this).
+
     `return_trace=True` returns `(answer, messages)` instead of just `answer` —
     used by the chapters' hands-on labs to display what happened at each step.
     """
     executor = executor or InProcessExecutor()
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
         {"role": "user", "content": task},
     ]
 

@@ -61,8 +61,13 @@ def task_1_math() -> dict:
     }
 
 
-def task_2_file_transform() -> dict:
-    """A file transform: average a CSV column, write the result to a real file."""
+def task_2_file_transform(system_prompt: str | None = None) -> dict:
+    """A file transform: average a CSV column, write the result to a real file.
+
+    `system_prompt` defaults to the backbone's own SYSTEM_PROMPT; pass a
+    different one to A/B a prompt variant against this exact task (used by
+    `reliability_and_ablation.py`'s prompt-ablation experiment).
+    """
     if AVERAGE_TXT.exists():
         AVERAGE_TXT.unlink()
 
@@ -72,7 +77,7 @@ def task_2_file_transform() -> dict:
         f"and write ONLY that number as text to {AVERAGE_TXT}. "
         f"Then state the final average in your answer."
     )
-    answer, messages = run_agent(task, return_trace=True)
+    answer, messages = run_agent(task, return_trace=True, system_prompt=system_prompt)
 
     with open(SCORES_CSV) as f:
         rows = list(csv.DictReader(f))

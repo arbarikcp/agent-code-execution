@@ -55,15 +55,68 @@ ModuleNotFoundError: No module named 'pandas'
 
 This wasn't staged or anticipated in the system prompt — it's what actually
 happened running this exact setup. The loop's design meant this was
-recoverable for free: `execute_code` catches the exception and returns the
+recoverable for free: the executor catches the exception and returns the
 real traceback as the Observation; the model's *second* code action, in both
 cases, switched to the stdlib `csv`/`statistics` modules and succeeded. This
 is the chapter's answer to "the first thing that will go wrong": in a minimal
 environment with no guaranteed library set, an agent trained on code that
 commonly uses `pandas`/`numpy` will reach for them by default and needs the
-traceback feedback loop to recover — which is exactly why "errors as
-observations" (Chapter 22) isn't optional polish, it's load-bearing from the
-very first real run.
+traceback feedback loop to recover — errors-as-observations is load-bearing
+from the very first real run, not optional polish.
+
+## Beyond one run: reliability, a prompt ablation, and a real boundary
+
+A single successful run doesn't establish that a task is reliably solvable.
+`code/reliability_and_ablation.py` runs three deeper, real-live-model
+measurements (all against `groq/llama-3.3-70b-versatile`; full output in
+`notebooks/ch05_minimal_agent.ipynb`):
+
+**Multi-trial reliability (3 trials each, our own small pass@3-style
+measurement):**
+
+```
+math task:  3/3 (100%), step counts: [2, 2, 2]
+stats task: 3/3 (100%), step counts: [3, 3, 3]
+```
+
+Both tasks solved correctly every trial, with identical step counts each
+time — these particular tasks are simple enough that behavior is highly
+consistent. That consistency is a finding, not an assumption: running the
+trials is what established it, rather than trusting the single run above.
+
+**Prompt ablation — does steering the model toward the standard library
+reduce the `ModuleNotFoundError` rate?** One sentence added to
+`SYSTEM_PROMPT` ("Prefer Python's standard library ... assume third-party
+packages are NOT installed unless you have already confirmed otherwise"),
+A/B'd against the file-transform task, 3 live trials each:
+
+```
+default_prompt:         3/3 succeeded (100%), ModuleNotFoundError rate: 100%, avg steps: 3.0
+stdlib_steered_prompt:  3/3 succeeded (100%), ModuleNotFoundError rate:   0%, avg steps: 2.0
+```
+
+**The one-sentence prompt change eliminated the `ModuleNotFoundError`
+entirely across all 3 trials** — both prompts reach the correct final answer
+100% of the time, but the default prompt wastes a full turn on a doomed
+`pandas` import in every single trial, while the steered prompt reaches the
+minimum possible 2 steps every time. This is a real, measured instance of
+what Chapter 44 (prompting for reliable code) generalizes — not a preview
+promise, a result already in hand.
+
+**A real step-budget boundary.** `run_agent(task, max_steps=1)` on the
+file-transform task raises `StepBudgetExceeded` for real
+(`"no final answer within 1 steps"`) — confirmed rather than assumed, since
+even a perfectly-behaved run needs at least 2 turns (one code action, one
+separate final-answer turn) to satisfy `SYSTEM_PROMPT`'s "no code block =
+final answer" contract.
+
+**A real infrastructure finding along the way:** running these trials
+back-to-back hit Groq's actual free-tier rate limit (12,000 tokens/minute)
+directly — a genuine `RateLimitError`, not a hypothetical concern. The
+experiment script now paces requests and retries with backoff
+(`_with_backoff` in `reliability_and_ablation.py`) as a local accommodation,
+explicitly flagged there as distinct from the real retry-policy design
+Chapter 22 covers.
 
 ## What v0 deliberately does not do yet
 
