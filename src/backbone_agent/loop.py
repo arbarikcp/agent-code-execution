@@ -1,13 +1,12 @@
-"""The backbone agent v0: generate -> extract -> execute -> observe -> repeat.
+"""The backbone agent: generate -> extract -> execute -> observe -> repeat.
 
-This is the whole loop (~40 lines of actual logic below the constants and
-docstrings) — the smallest thing that can plausibly be called a
-code-executing agent per Chapter 1's definition: the model's own output
-(code, then its result) determines its next input, until the model itself
-stops emitting code.
+Chapter 5 (v0): the whole loop in ~40 lines, one hardcoded execution backend.
+Chapter 6: the execution backend is now pluggable — `run_agent` accepts any
+`Executor` (default: `InProcessExecutor`, preserving v0's exact behavior) —
+without changing the loop's own control flow at all.
 """
 
-from .executor import execute_code
+from .executor import Executor, InProcessExecutor, observation_from_result
 from .model import call_model
 from .parsing import extract_code
 
@@ -39,20 +38,26 @@ def run_agent(
     model: str | None = None,
     max_steps: int = 10,
     return_trace: bool = False,
+    executor: Executor | None = None,
 ) -> str | tuple[str, list[dict]]:
     """Run the backbone loop on `task`; return the model's final plain-text answer.
 
     Each iteration is one full Reason-Act-Observe turn (Chapter 3's vocabulary):
     the model's reply IS the Thought+Action combined, `extract_code` separates
-    them, `execute_code` produces the real Observation, and the loop appends
+    them, `executor.run` produces the real Observation, and the loop appends
     that Observation to `messages` before calling the model again — the same
     context-growth mechanism `run_react_loop` and `run_codeact_loop` used in
     Chapter 3, now driven by a live model instead of a scripted one.
 
+    `executor` defaults to `InProcessExecutor()` — v0's original backend — but
+    any `Executor` (e.g. `SubprocessExecutor`, `KernelExecutor` from Chapter 6)
+    can be passed in; the loop's control flow doesn't change either way, which
+    is the entire point of the `Executor` interface.
+
     `return_trace=True` returns `(answer, messages)` instead of just `answer` —
-    used by the chapter's hands-on lab to display what happened at each step;
-    the loop's own control flow is identical either way.
+    used by the chapters' hands-on labs to display what happened at each step.
     """
+    executor = executor or InProcessExecutor()
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": task},
@@ -67,7 +72,8 @@ def run_agent(
             answer = reply.strip()  # no code block => the model is giving its final answer
             return (answer, messages) if return_trace else answer
 
-        observation = execute_code(code, {})
+        result = executor.run(code)
+        observation = observation_from_result(result)
         messages.append({"role": "user", "content": f"Observation:\n{observation}"})
 
     raise StepBudgetExceeded(f"no final answer within {max_steps} steps")
