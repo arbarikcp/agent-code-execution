@@ -98,7 +98,44 @@ model or a cleverer prompt; it moved from the Thought (text, reasoned by the
 model one file at a time) into the Action (code, executed all at once by the
 interpreter).
 
-## 4. Lineage: how the field got from §2 to §3
+## 4. Why the rewrite is more than a turn-count optimization
+
+Chapters 2 and much of the rest of §2/§3 above frame the ReAct→CodeAct
+rewrite as a token/turn efficiency win. There's a second, structural reason,
+demonstrated (not just claimed) in `code/react_vs_codeact.py`'s
+`CORRECT_LONG_REACT_SCRIPT` / `FLAWED_LONG_REACT_SCRIPT` pair: a 6-file
+version of the same task, where both scripts share **identical, individually
+correct** Observations, but the flawed script's Thought at one step
+misjudges a single comparison (`55 > 42` read as false). Every subsequent
+Thought trusts that wrong "running max," and the trace finishes with a
+confidently wrong answer — `a.txt`/`42`/`52` instead of the correct
+`d.txt`/`55`/`65` — despite `run_react_loop` never receiving a single
+incorrect Observation. **Nothing in the ReAct loop verifies a Thought's
+claim against the data it's reasoning about** — only actions produce
+verified, real Observations; the *interpretation* of those observations
+lives in unchecked free text.
+
+The equivalent CodeAct action for the same 6-file task delegates the
+comparison to `max(values, key=values.get)` and gets it right — not because
+this specific code is bug-free (Chapter 4's dynamic-revision demo shows code
+actions have their own real failure modes), but because there is no
+intermediate "running max" claim floating in generated text for a later step
+to misremember. This specific failure class — correct facts, silently wrong
+running interpretation of them — is structurally unavailable to a single
+code action the way it's available to a multi-step Thought chain.
+
+This isn't speculation dressed up as a demo: PAL's own abstract (verified
+quote, checked against the arXiv page) names precisely this failure mode —
+**"LLMs often make logical and arithmetic mistakes in the solution part,
+even when the problem is decomposed correctly"** — and reports a concrete,
+verified result from delegating computation to a real interpreter instead:
+**"PAL using Codex achieves state-of-the-art few-shot accuracy on the GSM8K
+benchmark of math word problems, surpassing PaLM-540B which uses
+chain-of-thought by absolute 15% top-1."** The `FLAWED_LONG_REACT_SCRIPT`
+demo is a small, hand-constructed instance of exactly the failure mode PAL's
+published, benchmarked result is about.
+
+## 5. Lineage: how the field got from §2 to §3
 
 ```
 2022-10-06  ReAct           Yao et al., arXiv:2210.03629
@@ -108,20 +145,29 @@ interpreter).
             │
             ▼
 2022-11-18  PAL              Gao et al., arXiv:2211.10435
-            │                Not iterated like ReAct — one generate-then-execute
-            │                step — but establishes the key idea §3 relies on:
-            │                offload *computation* to a real Python interpreter
-            │                instead of doing arithmetic/logic in the model's
-            │                own text.
+            │                Verified abstract quote: "LLMs often make logical
+            │                and arithmetic mistakes in the solution part, even
+            │                when the problem is decomposed correctly." Not
+            │                iterated like ReAct — one generate-then-execute
+            │                step — but establishes the exact mechanism §4
+            │                demonstrates: offload computation to a real Python
+            │                interpreter instead of doing arithmetic/logic in
+            │                the model's own text. Verified result: "PAL using
+            │                Codex ... surpassing PaLM-540B which uses
+            │                chain-of-thought by absolute 15% top-1" on GSM8K.
             │
             ▼
 2023-02-09  Toolformer       Schick et al., arXiv:2302.04761
-            │                Different axis: trains the *decision* of when/how
-            │                to call a tool into the model itself (self-supervised
-            │                fine-tuning) rather than eliciting it by prompting.
-            │                Orthogonal to the text-vs-code action-shape question,
-            │                included because it's part of the standard tool-use
-            │                lineage this chapter's spec names.
+            │                Different axis: verified abstract quote — the
+            │                model learns, self-supervised, "which APIs to
+            │                call, when to call them, what arguments to pass,
+            │                and how to best incorporate the results into
+            │                future token prediction," from "a handful of
+            │                demonstrations for each API." Trains the
+            │                *decision* to call a tool into the model itself
+            │                rather than eliciting it by prompting — orthogonal
+            │                to the text-vs-code action-shape question, but
+            │                part of the same tool-use lineage.
             │
             ▼
 2024-02-01  CodeAct          Wang et al., arXiv:2402.01030
@@ -131,14 +177,15 @@ interpreter).
                              PAL's "offload computation to the interpreter" idea,
                              now embedded inside every turn of the loop instead
                              of used once. This is exactly the §2 → §3 rewrite
-                             above.
+                             above, and it structurally closes off the failure
+                             class §4 demonstrates.
 ```
 
-All four titles, author lists, and submission dates were checked directly
-against each paper's arXiv abstract page in this session, not recalled from
-memory.
+All four titles, author lists, and submission dates — and the direct PAL and
+Toolformer abstract quotes above — were checked against each paper's arXiv
+abstract page in this session, not recalled from memory.
 
-## 5. The one-sentence version
+## 6. The one-sentence version
 
 **ReAct** gave agents an iterated loop; **PAL** showed code beats text for
 computation; **Toolformer** showed the tool-use decision can be learned into
