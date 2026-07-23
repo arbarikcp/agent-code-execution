@@ -9,7 +9,7 @@ chapter (see `CLAUDE.md` → Per-Chapter Workflow).
 |---|---|---|---|
 | 01 | What Is an Agent? | done | No backbone code yet — deliverable is a data-driven comparison (`code/systems.py`) + one-page reference. |
 | 02 | Action Spaces: Text, JSON, and Code | done | Still no backbone — deliverable is a measured comparison matrix (`code/action_spaces.py`, real `tiktoken` counts) of free text / JSON tool calls / code actions on one worked task. |
-| 03 | The Reason–Act–Observe Loop | todo | |
+| 03 | The Reason–Act–Observe Loop | done | Still no backbone — `code/react_vs_codeact.py` runs a real ReAct loop and a real CodeAct loop (scripted model, real execution/observations) over the same task; deliverable is an annotated loop diagram + verified ReAct→PAL→Toolformer→CodeAct lineage (dates checked against arXiv abstract pages). |
 | 04 | Why Code Execution | todo | |
 | 05 | A Minimal Code-Executing Agent | todo | **Backbone agent v0 starts here.** Introduces `src/backbone_agent/` and the litellm-based model interface (see Backbone State below). |
 | 06–66 | ... | todo | Not yet reached. |
@@ -39,10 +39,12 @@ generate → extract → execute → observe → repeat loop.
 
 ## For the next session
 
-Next chapter to implement: **Chapter 3 — The Reason–Act–Observe Loop**
-(Part I). Read its entry in `agent_code_execution_study_guide.md` before
-starting; it does not depend on the (not-yet-built) backbone agent. Chapter 2's
-`code/action_spaces.py` traces (JSON tool calling vs. a single code action) are
-a useful reference point when Chapter 3 asks you to hand-write a ReAct trace
-and rewrite it as a CodeAct trace — the JSON trace in `code/action_spaces.py`
-is already close to a ReAct-style thought/action/observation shape.
+Next chapter to implement: **Chapter 4 — Why Code Execution** (Part I, the
+last chapter before the Chapter 5 backbone starts). Read its entry in
+`agent_code_execution_study_guide.md` before starting; it does not depend on
+the (not-yet-built) backbone agent. Chapter 4's hands-on direction asks to
+"reproduce a small CodeAct-style example and measure success and step count
+against a JSON-tool baseline" — Chapter 3's `code/react_vs_codeact.py`
+(ReAct vs. CodeAct traces) and Chapter 2's `code/action_spaces.py` (JSON vs.
+code token/turn counts) are both direct inputs to that comparison; Chapter 4
+likely extends or combines them rather than starting from scratch.
