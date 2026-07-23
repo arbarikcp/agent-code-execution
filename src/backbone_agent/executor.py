@@ -158,7 +158,7 @@ class KernelExecutor(Executor):
     interpreter, not a `Executor`-level illusion of persistence.
     """
 
-    def __init__(self, startup_timeout_s: float = 60.0):
+    def __init__(self, startup_timeout_s: float = 60.0, execute_timeout_s: float = 30.0):
         from jupyter_client import KernelManager
 
         start = time.monotonic()
@@ -168,8 +168,23 @@ class KernelExecutor(Executor):
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=startup_timeout_s)
         self.startup_duration_s = time.monotonic() - start
+        self.execute_timeout_s = execute_timeout_s
 
     def run(self, code: str) -> ExecutionResult:
+        """Run `code` against the persistent kernel.
+
+        NOTE — a real, un-papered-over gap: if the kernel doesn't finish
+        within `execute_timeout_s` (e.g. `code` hangs, as in an infinite
+        loop), `self._kc.get_iopub_msg` raises `queue.Empty`, which
+        propagates OUT of this method uncaught. That violates the `Executor`
+        base class's own contract ("must not raise on the code's own
+        errors") — deliberately left unhandled here rather than silently
+        patched, because Chapter 6's Failure Lab demonstrates exactly this
+        gap. Fixing it (catching the timeout and returning a failed
+        `ExecutionResult`) is left as a concrete, motivated exercise rather
+        than done here, since fixing it invisibly would remove the failure
+        this chapter needs to show.
+        """
         start = time.monotonic()
         msg_id = self._kc.execute(code)
         stdout_parts: list[str] = []
@@ -178,7 +193,7 @@ class KernelExecutor(Executor):
         error_text: str | None = None
 
         while True:
-            msg = self._kc.get_iopub_msg(timeout=30)
+            msg = self._kc.get_iopub_msg(timeout=self.execute_timeout_s)  # raises queue.Empty on hang
             if msg["parent_header"].get("msg_id") != msg_id:
                 continue  # message from a different (e.g. stale) request
             msg_type = msg["header"]["msg_type"]
