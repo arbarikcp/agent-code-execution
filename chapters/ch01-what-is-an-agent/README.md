@@ -2,127 +2,154 @@
 
 ## 1. Concept
 
-An **agent** is a **loop** that couples a language model to an environment through
-**actions** and **observations**, where the model's own prior output determines its
-next input. That's the whole definition this chapter defends. Everything else in
-this guide — code as an action space, execution backends, context engineering,
-guardrails — is engineering *around* that loop. Get the loop's shape wrong in your
-head and every later chapter will feel like a grab-bag of unrelated techniques
-instead of one coherent system.
+An **agent** is a **loop** that couples a language model to an environment
+through **actions** and **observations**, where the model's own prior output
+determines its next input. That's the definition — but a definition you can't
+apply to a real system is decoration. This chapter's actual work is turning
+that sentence into a **decision procedure**: four yes/no structural
+questions (`LoopPredicates` in `code/systems.py`) that any real system can be
+run through to get a checkable answer, not an impression.
 
 ## 2. Why This Matters for Code-Executing Agents
 
-This entire guide is about a specific kind of loop: one where the action the model
-emits is *executable code*, and the observation is whatever running that code
-produces. Before any of that makes sense, "loop" has to mean something precise. If
-you think of "agent" as "an LLM with some tools bolted on," you'll misjudge which
-parts of a code-executing agent actually matter (the loop and the feedback path)
-versus which parts are incidental (which specific tools, which specific model).
-Chapter 4 onward argues code is a *good action space for the loop* — that argument
-only lands if you already see the loop as the object being engineered.
+Every later chapter assumes you can look at a system and say, precisely,
+whether and how it's an agent. Getting this wrong in either direction has
+real costs: over-calling something an "agent" gets you unwarranted
+step-budget and guardrail machinery around a system that never needed it;
+under-calling something an agent (because it's not called "agentic" or
+doesn't look like a chatbot) means missing that it needs exactly that
+machinery. This chapter builds a tool for making that call correctly,
+and then deliberately tries to break the tool with two hard cases.
 
 ## 3. Mental Model
 
-Picture three concentric layers:
+Four questions, in order, each one a real fork:
 
 ```
- ┌─────────────────────────────────────────────┐
- │ Environment (filesystem, interpreter, APIs)  │
- │   ┌───────────────────────────────────────┐  │
- │   │ Loop (harness): calls model, executes  │  │
- │   │ action, captures result, repeats       │  │
- │   │   ┌─────────────────────────────────┐  │  │
- │   │   │ Model: pi(context) -> action     │  │  │
- │   │   └─────────────────────────────────┘  │  │
- │   └───────────────────────────────────────┘  │
- └─────────────────────────────────────────────┘
+1. Is the policy a language model?           NO ─► NON_MODEL_CONTROL_LOOP (thermostat)
+   │ YES
+2. Does the model choose the action,          NO ─► has hardcoded pipeline
+   or is it predetermined by a pipeline?           steps?  YES ─► FIXED_PIPELINE
+   │ YES                                            NO ─► SINGLE_CALL
+3. Does the loop repeat based on the          NO ─► SINGLE_TOOL_CALL
+   model's own output, with the result
+   re-entering ITS OWN next context?
+   │ YES
+4. -> AUTONOMOUS_LOOP
 ```
 
-The model never touches the environment directly — the loop mediates every action
-and every observation. The model is a pure function of context; all state, all
-history, all "what happened last time" lives in the context the loop assembles and
-feeds back in. This is why later chapters (Part IV, Part VI) spend so much effort
-on the loop and the context, not the model.
+The critical discipline is: answer these from the system's **structure**,
+never from its **name**. Section 5 below shows a system literally named
+"RAG" (usually a fixed-pipeline term) landing in `AUTONOMOUS_LOOP`, and a
+system with a textbook closed feedback loop (a thermostat) landing outside
+the spectrum entirely, because the predicates don't read names or vibes —
+only wiring.
 
 ## 4. Architecture (place in the loop / context)
 
-This chapter *is* the architecture — it names the parts every later chapter refers
-to without redefining them:
-
-- **Model** → shows up again as "the controller" throughout, and specifically as
-  the thing Part VII (Code Generation Quality) tries to get reliable output from.
-- **Loop / harness** → becomes its own subject in Part IV (Chapter 18, "Anatomy of
-  the Harness"), where it's decomposed into concrete responsibilities.
-- **Tools / action space** → becomes Chapter 2 immediately next, then all of Part V.
-- **Environment** → becomes Part II (execution substrate) and Part III (workspace,
-  filesystem, CLI).
-- **Observation** → becomes Chapter 8 and all of Part VI (context engineering).
-
-Every part of this guide is one of these four boxes, expanded.
+This chapter's classification scheme is what every later chapter's code
+implicitly assumes when it treats something as "the agent." The backbone
+built starting Chapter 5 is, in this chapter's terms, a system whose
+predicates are `policy_is_a_language_model=True`,
+`model_chooses_the_action=True`, `loop_repeats_based_on_model_output=True`,
+`observation_reenters_model_context=True` — i.e., `AUTONOMOUS_LOOP` by
+construction. Confirming that now, precisely, is what makes it legitimate to
+stop re-justifying "why does this agent need a step budget / a guardrail /
+observation formatting" in every subsequent chapter — the classification
+itself is the justification.
 
 ## 5. Detailed Explanation
 
-**Model, loop, tools, environment — separated.** The model is stateless across
-calls; it only knows what's in the context it's given this call. The loop is the
-piece of ordinary code that (a) assembles context, (b) calls the model, (c) parses
-the model's output into an action, (d) executes that action against the
-environment, (e) turns the result into an observation, (f) appends the observation
-to context, and (g) decides whether to repeat. Tools are the vocabulary of actions
-the model is allowed to emit — see `code/systems.py` in this chapter, where
-`AgentSystem.tools` and `.action_unit` name that vocabulary per system. The
-environment is whatever actually changes state and produces the observation — a
-chat transcript, a vector store, or (for the systems this guide builds) a
-filesystem plus a code interpreter.
+**The five predicates** (`LoopPredicates` in `code/systems.py` — the
+docstring calls out four "structural" ones plus the model-policy gate
+first):
 
-**Autonomy spectrum.** Systems differ in how much of "what happens next" is decided
-by the model at *runtime* versus by an engineer at *design* time:
+- `policy_is_a_language_model` — checked first and short-circuits everything
+  else. A system can satisfy every other predicate and still not be an
+  "agent" in this guide's sense if a fixed rule, not a model, is making the
+  decision. This predicate exists specifically because loop-shape alone is
+  not sufficient — see the thermostat case below.
+- `has_hardcoded_pipeline_steps` — are there engineer-fixed stages (embed,
+  retrieve, format) whose occurrence and order don't depend on the model?
+- `model_chooses_the_action` — does the model pick WHICH action happens, as
+  opposed to the action being predetermined and the model only filling in
+  content?
+- `loop_repeats_based_on_model_output` — is there more than one model
+  decision point, where whether/how the system continues is itself
+  something the model's own output determines?
+- `observation_reenters_model_context` — does the result of an action come
+  back to the SAME model, before its next call — not to a human, not to a
+  log, specifically back into that model's own next context?
 
-- `SINGLE_CALL` — one model call, no loop at all (a chatbot's single reply).
-- `FIXED_PIPELINE` — a hardcoded sequence of steps; the model fills in content,
-  not control flow (a RAG pipeline: retrieve → augment → generate, always in that
-  order).
-- `SINGLE_TOOL_CALL` — the model picks zero or one tool per turn, but nothing
-  feeds the tool's result back for the model to act on again within that turn.
-- `AUTONOMOUS_LOOP` — the model's own output determines the next action,
-  repeatedly, until the model itself signals done (or a budget stops it). This is
-  the only point on the spectrum with a closed feedback loop.
+`classify_autonomy()` is a pure function over these five booleans — see
+`code/systems.py` for the full decision tree. There is no fifth,
+judgment-call step after the predicates are answered.
 
-`chapters/ch01-what-is-an-agent/code/systems.py` encodes this ordering as the
-`Autonomy` enum and assigns each of three real systems a level, forcing a concrete
-answer instead of a vibe.
+**Boundary case 1 — does the taxonomy classify by structure or by name?**
+`AGENTIC_RAG` (in `code/systems.py`) is a RAG system where the model itself
+decides, each turn, whether to retrieve again or answer — as opposed to
+`RAG_PIPELINE`'s hardcoded embed→retrieve→generate sequence. Its predicates
+are **identical** to `CODING_AGENT`'s three loop-shape fields
+(`model_chooses_the_action=True`, `loop_repeats_based_on_model_output=True`,
+`observation_reenters_model_context=True`) — confirmed directly in the
+notebook by comparing the two `LoopPredicates` objects field-by-field. Both
+classify as `AUTONOMOUS_LOOP`, despite one being "RAG" (a term this
+chapter's OTHER example, `RAG_PIPELINE`, uses for a `FIXED_PIPELINE`
+system) and the other being an obviously agentic coding tool. This is the
+direct payoff of predicates over labels: a name can't fool a check that
+never reads the name.
 
-**Action and observation.** An *action* is the unit of model output the loop
-treats as "do something" (as opposed to a final answer meant for a human). An
-*observation* is whatever the environment returns after that action runs, and
-which the loop appends to context for the next call. The action → environment →
-observation → context → next action cycle is the loop; nothing else in the system
-needs to be complicated for something to qualify as an agent.
+**Boundary case 2 — is a closed feedback loop sufficient for "agent"?**
+`THERMOSTAT` measures temperature, compares to a setpoint, and turns heat
+on/off — forever, each cycle conditioned on the last. Checked directly
+against `CODING_AGENT` on the three loop-shape predicates alone (ignoring
+`policy_is_a_language_model`), **all three agree**: the thermostat's own
+action (heat on) changes its environment (the room warms), which changes
+its next observation (a new reading), which determines its next action —
+structurally indistinguishable from the coding agent's reason-act-observe
+cycle. It's excluded from the autonomy spectrum entirely (not placed at
+`SINGLE_CALL`, which would at least keep it in the family — it gets its own
+`NON_MODEL_CONTROL_LOOP` bucket) purely because `policy_is_a_language_model`
+is `False`. The lesson: closed feedback loops are not new — control theory
+has built them for a century — so if your working definition of "agent" is
+just "has a feedback loop," a thermostat already satisfies it. What's
+actually new in the LLM sense is specifically that a *model* is the box
+making the decision; this chapter's first predicate exists to make that
+requirement explicit rather than implicit.
 
-**The controller view.** Treat the model as a policy `pi(context) -> action`. This
-framing (borrowed from reinforcement learning, informally) is useful because it
-makes "is this an agent?" a question about whether `pi`'s own output feeds back
-into `pi`'s own future input — not a question about model capability, prompt
-quality, or how many tools are wired up.
-
-**Agent vs. pipeline.** A pipeline (workflow) is a fixed orchestration graph: an
-engineer decides the sequence of steps in advance, and the model's job is
-constrained to filling in content inside that fixed structure. An agent is a loop
-where the model's own output decides the *next step*, at run time, not just the
-content of a predetermined step. The RAG pipeline in `systems.py` illustrates this
-precisely: it calls an LLM, but the LLM never decides to retrieve again, retrieve
-differently, or do anything except "produce the final text" — so by this
-chapter's definition it is not an agent, no matter how good the retrieval is.
+**An honest gap, not a forced fit.** `classify_autonomy` raises `ValueError`
+on one predicate combination: `model_chooses_the_action=False` while the
+loop still repeats and re-feeds itself observations. This isn't a
+theoretical impossibility — a real pattern fits it: a fixed pipeline
+retried on failure (e.g., "re-run this exact extract-then-validate sequence
+until a checksum passes, feeding the failure back into extraction each
+time"). The pipeline's *steps* are still hardcoded (the model, if any,
+never chooses what runs), but the *loop* genuinely repeats and feeds itself
+feedback. This is a fifth class the four-way taxonomy has no name for. The
+decision procedure raises instead of silently forcing this into
+`FIXED_PIPELINE` or `SINGLE_TOOL_CALL` — an honest gap is more useful than a
+wrong answer that looks confident.
 
 ## 6. Minimal Implementation
 
-There is no runnable *agent* yet in this guide — that arrives in Chapter 5. This
-chapter's "minimal implementation" is the smallest code that makes the four-part
-breakdown concrete rather than asserted: `code/systems.py` defines an
-`AgentSystem` dataclass (`model_role`, `loop_description`,
-`has_model_driven_loop`, `tools`, `environment`, `action_unit`,
-`observation_unit`) and an `Autonomy` enum, then instantiates three real systems —
-a chatbot, a RAG pipeline, and a coding agent — as data. `render_comparison_table`
-renders the model/loop/tools/environment breakdown as a table. Run it directly:
+`code/systems.py`:
+
+- `LoopPredicates` — the five-field frozen dataclass.
+- `classify_autonomy(predicates) -> Autonomy` — the decision procedure,
+  including the deliberate `ValueError` for the unmodeled combination.
+- `AgentSystem` — now computes `autonomy` in `__post_init__` from its own
+  `predicates`, so there is no way to construct a system whose label
+  disagrees with its structure.
+- Six systems: `CHATBOT` (SINGLE_CALL), `RAG_PIPELINE` (FIXED_PIPELINE),
+  `AGENTIC_RAG` (AUTONOMOUS_LOOP — boundary case 1),
+  `SINGLE_TOOL_CALL_EXAMPLE`, an email auto-tagger (SINGLE_TOOL_CALL —
+  the one gap in v1 of this module, which asserted this category existed
+  without ever instantiating an example of it), `CODING_AGENT`
+  (AUTONOMOUS_LOOP), `THERMOSTAT` (NON_MODEL_CONTROL_LOOP — boundary case 2).
+- `EXPECTED_CLASSIFICATION` — a hand-reasoned answer key, checked against
+  the derived result for all six systems at runtime.
+
+Run it directly:
 
 ```bash
 source .venv/bin/activate
@@ -130,162 +157,194 @@ python chapters/ch01-what-is-an-agent/code/systems.py
 ```
 
 ```
-System                                                  | Autonomy        | Model-driven loop? | Action unit                                                   | Observation unit
---------------------------------------------------------+-----------------+---------------------+----------------------------------------------------------------+--------------------------------------------------------------------------
-Customer-support chatbot                                | SINGLE_CALL     | no                  | A chat message                                                  | The human's next message (not a consequence of the agent's own action)
-RAG question-answering pipeline                         | FIXED_PIPELINE  | no                  | N/A — the model does not choose actions, only generates text   | N/A — retrieved passages are pipeline input, not a returned observation
-Coding agent (writes and runs code to complete a task)  | AUTONOMOUS_LOOP | YES                 | A block of executable code                                     | stdout/stderr/return value/traceback from running that code
-```
+System                                                 | Autonomy               | Model-driven loop? | ...
+Customer-support chatbot                               | SINGLE_CALL            | no                  | ...
+RAG question-answering pipeline                        | FIXED_PIPELINE         | no                  | ...
+Agentic RAG (model decides whether to retrieve again)  | AUTONOMOUS_LOOP        | YES                 | ...
+Email auto-tagger (one tool call, no loop)             | SINGLE_TOOL_CALL       | no                  | ...
+Coding agent (writes and runs code to complete a task) | AUTONOMOUS_LOOP        | YES                 | ...
+Home thermostat (closed loop, no model)                | NON_MODEL_CONTROL_LOOP | no                  | ...
 
-Only the coding agent has `Model-driven loop? = YES` — that column is the whole
-argument of this chapter, expressed as data instead of prose.
+=== Classification check: derived autonomy vs. hand-reasoned expectation ===
+  ... (all 6) ... OK
+
+All 6 systems: derived classification matches hand-reasoned expectation.
+```
 
 ## 7. Hands-on Lab
 
-`notebooks/ch01_what_is_an_agent.ipynb` (executed, committed with outputs) carries
-out the chapter's hands-on direction — diagram three real systems and label model,
-loop, tools, and environment in each — using `systems.py`:
+`notebooks/ch01_what_is_an_agent.ipynb` (executed, committed with outputs)
+goes beyond the chapter's original hands-on direction (diagram three systems)
+by deriving autonomy from predicates for six systems, verifying the
+derivation against hand-reasoned expectations, and running both boundary
+cases as live comparisons: `AGENTIC_RAG` vs. `CODING_AGENT`'s predicates
+(confirmed identical on the loop-shape fields, §3 of the notebook) and
+`THERMOSTAT` vs. `CODING_AGENT`'s predicates (confirmed identical on the
+three loop-shape fields, different only on `policy_is_a_language_model`,
+§4). It also runs the deliberately-impossible predicate combination through
+`classify_autonomy` and shows the `ValueError`, then reasons through a real
+pattern (a retried fixed pipeline) that would need a fifth class.
 
-1. Renders the comparison table above.
-2. Prints the full per-system breakdown (`model_role`, `loop_description`,
-   `has_model_driven_loop`, `tools`, `environment`, `action_unit`,
-   `observation_unit`) for all three systems.
-3. Works through the controller view (`pi(context) -> action`) as a table of what
-   each system's policy conditions on and controls.
-4. Prints the `Autonomy` enum in declared order as a sanity check that the
-   spectrum in this README matches the code.
-
-To extend it yourself: add a fourth `AgentSystem` for something you use daily
-(an IDE autocomplete, a build system, a game NPC) and decide, using the same four
-fields, whether it belongs on the autonomy spectrum and where.
+To extend it yourself: write `LoopPredicates` for a system you actually use
+(a build system, an IDE's autocomplete, a game NPC's AI) and see which class
+it lands in — then check whether that classification matches your intuition,
+and if it doesn't, figure out which predicate you'd have answered
+differently before writing the code.
 
 ## 8. Failure Lab
 
-The failure mode this chapter cares about is *conceptual*, not a runtime crash:
-mislabeling a fixed pipeline as an agent (or vice versa) because it has an LLM in
-it. Two ways to reproduce this failure deliberately:
+Two failures, both already exercised above rather than left as reader
+exercises:
 
-1. Take the RAG pipeline in `systems.py` and mentally "sell" it as an agent
-   (`has_model_driven_loop=True`) by pointing at its `vector_search` tool.
-   Then ask: *does the model's output ever change which step runs next?* It
-   doesn't — the graph is fixed. Flipping the flag would be a category error, and
-   it's the exact error that leads teams to build "agents" that never actually
-   need agentic infrastructure (retries, budgets, guardrails) because nothing in
-   them loops.
-2. Take the coding agent and imagine removing the feedback path — the loop still
-   calls the interpreter, but the result is discarded instead of being appended to
-   context. What's left has an environment and an action, but no observation
-   reaching the model, so `pi`'s next call can't condition on what just happened.
-   That system is a single tool call repeated blindly, not a loop — it would keep
-   re-emitting the same action forever because nothing it does can change its own
-   next input. This is the shape of the "stuck in a rut" failure mode Chapter 26
-   returns to.
+1. **Classifying by name instead of structure** (§3 of the notebook): if you
+   trusted "RAG" to mean `FIXED_PIPELINE` without checking `AGENTIC_RAG`'s
+   actual predicates, you'd misclassify a genuinely autonomous system as a
+   fixed one — and then under-build it (no step budget, no loop-detection
+   guardrail, no termination protocol), because you'd have concluded it
+   didn't need any of that.
+2. **Trusting loop-shape alone** (§4 of the notebook): if your definition of
+   "agent" stopped at "has a closed feedback loop," a thermostat would
+   qualify. This isn't a hypothetical slip — "has memory and reacts to
+   its environment" is a genuinely common informal definition of agent, and
+   it's exactly the definition the thermostat is built to break.
 
-Both failures come from skipping the question this chapter insists on: *does the
-model's own output feed back into its own next input?*
+A third failure, deliberately induced: **forcing an unmodeled system into
+the wrong bucket.** The `ValueError` in `classify_autonomy` for the
+"loops and feeds itself observations but the model never chooses the
+action" combination exists because forcing that combination into
+`FIXED_PIPELINE` (wrong: it DOES repeat and self-feed, which no other
+`FIXED_PIPELINE` example does) or `SINGLE_TOOL_CALL` (wrong: it's not a
+single call) would both be silently incorrect. Raising is the honest
+choice; see Section 5's retried-pipeline example for what a real instance
+of this gap looks like.
 
 ## 9. Instrumentation (what to log / trace / measure)
 
-Nothing runs yet that needs runtime tracing (that starts in Chapter 5 and becomes
-its own subject in Chapter 59). What *is* worth "instrumenting" at this stage is
-conceptual: for any system you're evaluating, record its `Autonomy` level and
-`has_model_driven_loop` value before deciding what infrastructure it needs. A
-`SINGLE_CALL` or `FIXED_PIPELINE` system doesn't need step budgets, loop-detection
-guardrails, or observation truncation — those are loop problems. Misclassifying a
-pipeline as a loop leads to over-building; misclassifying a loop as a pipeline
-leads to missing termination and budget controls entirely (Chapters 21, 26, 27).
+For any system under evaluation: record its five `LoopPredicates` values,
+not just its final `Autonomy` label. The label alone can't be audited later
+(did the classifier change? did the system's actual behavior change?) but
+the predicates can be independently re-checked against the system's real
+code path. This is a direct instance of a habit this whole guide returns to:
+prefer a decision procedure whose inputs you can re-verify over a
+conclusion you can only take on faith.
 
 ## 10. Design Considerations
 
-- **Don't loop things that don't need to loop.** A fixed pipeline is easier to
-  test, cheaper to run, and more predictable than a loop. Only reach for an
-  autonomous loop when the *sequence* of steps genuinely can't be decided in
-  advance — which is most of what the rest of this guide is about, but it is a
-  deliberate trade against determinism and cost, not a default.
-- **The autonomy spectrum is a design knob, not just a taxonomy.** You can
-  deliberately build a `SINGLE_TOOL_CALL` system instead of a full loop when you
-  want most of the benefit of model-chosen actions with none of the runaway-cost
-  or non-termination risk of an open-ended loop (Chapter 26).
-- **The four-part separation pays off later.** Keeping "model," "loop," "tools,"
-  and "environment" as distinct concerns now is what makes Chapter 9's pluggable
-  executor interface and Chapter 18's harness abstraction feel natural instead of
-  arbitrary — they're just formalizing boundaries this chapter already drew.
+- **A taxonomy that can't be fooled by names is worth the extra
+  indirection.** `LoopPredicates` is more code than just writing
+  `autonomy=Autonomy.FIXED_PIPELINE`, but Section 5's `AGENTIC_RAG` result
+  is only trustworthy because the predicates never look at the string
+  `"RAG"`.
+- **An honest `ValueError` beats a silently wrong classification.** The
+  temptation when building a decision procedure is to make it total (handle
+  every input, never raise). Resist that when the domain genuinely has gaps
+  — Section 5's retried-pipeline example shows the gap is real, not
+  hypothetical, and a taxonomy that pretends otherwise would eventually
+  misclassify something that actually happens.
+- **The model-policy predicate is doing more work than it looks like.**
+  It's checked first and short-circuits everything else, which is a
+  modeling choice: it says "a system's LOOP SHAPE is irrelevant to whether
+  it's an agent if there's no model." An alternative design could have kept
+  loop-shape and model-presence as two independent axes instead of a
+  short-circuit — worth noticing that this chapter picked one specific
+  design, not the only possible one.
 
 ## 11. Common Mistakes
 
-- **"An agent is just a prompt."** The prompt shapes one model call. The loop —
-  specifically, whether the model's output feeds back into its own future input —
-  is what makes something an agent. A great prompt on a fixed pipeline is still a
-  pipeline.
-- **Counting tool calls as a proxy for "agentic."** A workflow can invoke many
-  tools and still be a fixed graph if an engineer, not the model, decided the
-  sequence at design time.
-- **Treating autonomy as binary.** "Is it an agent, yes or no" is usually the
-  wrong question; "where on the `SINGLE_CALL → FIXED_PIPELINE → SINGLE_TOOL_CALL →
-  AUTONOMOUS_LOOP` spectrum does it sit" is more precise and more useful for
-  deciding what infrastructure the system needs.
-- **Conflating the model's capability with the system's agency.** A very capable
-  model wrapped in a `SINGLE_CALL` system is still not an agent; a weak model
-  wrapped in a genuine feedback loop is.
+- **"An agent is just a prompt."** Neither a prompt nor a model alone
+  appears in any of the five predicates as sufficient on its own —
+  `policy_is_a_language_model=True` is necessary but nowhere near
+  sufficient (three more predicates have to hold for `AUTONOMOUS_LOOP`).
+- **Counting tool calls, or the presence of a feedback loop, as a proxy for
+  "agentic."** Section 4's thermostat has a feedback loop and zero tool
+  calls in the LLM sense and still isn't an agent by this definition;
+  Section 3's `AGENTIC_RAG` has one tool (`vector_search`) and clearly is.
+  Tool count predicts nothing here.
+- **Treating a name ("agentic X") as evidence.** Section 3 exists
+  specifically to demonstrate that the taxonomy has to ignore names to be
+  trustworthy — a system's marketing name is not one of the five
+  predicates and never should be.
+- **Forcing every system into one of the four labeled classes.** Section 5's
+  retried-pipeline example doesn't fit any of them; pretending it does
+  (by picking whichever is "closest") throws away real information about
+  the system's actual structure.
 
 ## 12. Comparisons / Alternatives
 
-| System | Autonomy | Model-driven loop? | Why it's classified this way |
-|---|---|---|---|
-| Chatbot | `SINGLE_CALL` | No | A human, not the model's own output, decides the next turn. |
-| RAG pipeline | `FIXED_PIPELINE` | No | The retrieve→generate sequence is hardcoded; the model can't alter it. |
-| Single JSON tool call | `SINGLE_TOOL_CALL` | No | The model picks one action, but nothing feeds its result back for another model-driven decision within that turn. |
-| Coding agent | `AUTONOMOUS_LOOP` | Yes | The model's own output (code) produces an observation that re-enters its own context, repeatedly, until it stops itself. |
+| System | `policy_is_a_language_model` | `has_hardcoded_pipeline_steps` | `model_chooses_the_action` | `loop_repeats_based_on_model_output` | `observation_reenters_model_context` | Autonomy |
+|---|---|---|---|---|---|---|
+| Chatbot | T | F | F | F | F | SINGLE_CALL |
+| RAG pipeline | T | T | F | F | F | FIXED_PIPELINE |
+| Agentic RAG | T | F | T | T | T | AUTONOMOUS_LOOP |
+| Email auto-tagger | T | F | T | F | F | SINGLE_TOOL_CALL |
+| Coding agent | T | F | T | T | T | AUTONOMOUS_LOOP |
+| Thermostat | F | T | T | T | T | NON_MODEL_CONTROL_LOOP |
 
-(Full data behind this table: `code/systems.py`.)
+Read down the "Agentic RAG" and "Coding agent" rows, and down the
+"Thermostat" and "Coding agent" rows, to see the two boundary cases as raw
+predicate diffs rather than prose.
 
 ## 13. Review Questions
 
-1. In your own words, what is the one property that separates an `AUTONOMOUS_LOOP`
-   system from a `FIXED_PIPELINE` system that also calls an LLM?
-2. Why is "an agent is just a prompt" wrong? What would you point to in a system
-   to prove or disprove it?
-3. Take a system you use or have built. Assign it a point on the autonomy
-   spectrum and justify it using the `AgentSystem` fields (`model_role`,
-   `has_model_driven_loop`, `action_unit`, `observation_unit`).
-4. Why does removing the "observation feeds back into context" step turn a coding
-   agent into something closer to a single repeated tool call, per the Failure Lab?
-5. Where does code execution fit into this four-part model — is it a new fifth
-   part, or does it belong to one of the four? (Chapter 2 will answer this
-   directly; try to answer it yourself first.)
+1. Without looking at the answer key, write out `LoopPredicates` for a voice
+   assistant that can only ever answer one question per wake word (no
+   follow-up without a new wake word) but CAN call a weather API or a timer
+   API depending on what you asked. Which class does it land in, and why?
+2. `AGENTIC_RAG` and `CODING_AGENT` have identical loop-shape predicates.
+   Name one structural (not cosmetic) difference between them that the
+   current five predicates do NOT capture — i.e., a way they genuinely
+   differ that this taxonomy is silent about.
+3. Why does `policy_is_a_language_model` get checked FIRST, before any
+   loop-shape predicate, rather than last?
+4. Construct your own predicate combination that you believe
+   `classify_autonomy` mishandles or can't classify sensibly — besides the
+   one already shown to raise `ValueError`. Is there one? If not, why not?
+5. The thermostat satisfies three of five predicates identically to the
+   coding agent. If a future chapter needed to distinguish "systems with a
+   real feedback loop" from "systems with an LLM as the policy" as two
+   SEPARATE axes rather than one gated definition, what would break in the
+   current `classify_autonomy` design?
 
 ## 14. Chapter Summary
 
-An agent is a loop, not a model. The loop couples a model (a policy
-`pi(context) -> action`) to an environment through actions and observations, and
-what makes it an *agent's* loop specifically is that the model's own output
-determines its own next input — a closed feedback path. Real systems sit at
-different points on an autonomy spectrum (`SINGLE_CALL`, `FIXED_PIPELINE`,
-`SINGLE_TOOL_CALL`, `AUTONOMOUS_LOOP`) depending on how much of "what happens
-next" is decided by the model at runtime versus by an engineer in advance. Only
-`AUTONOMOUS_LOOP` systems need the loop-engineering, budget, and guardrail
-machinery the rest of this guide builds — which is exactly why getting this
-classification right, early, matters.
+"Agent" is operationalized here as a pure function of five structural
+predicates, not a label applied by judgment: is the policy a language model,
+are there hardcoded pipeline steps, does the model choose the action, does
+the loop repeat based on the model's own output, and does the observation
+re-enter that same model's context. Two boundary cases stress-tested this
+directly: `AGENTIC_RAG`, whose predicates are identical to `CODING_AGENT`'s
+despite the misleading "RAG" name, confirming the taxonomy reads structure
+and not labels; and `THERMOSTAT`, whose loop-shape predicates are ALSO
+identical to `CODING_AGENT`'s, confirming that a closed feedback loop alone
+(control theory's oldest idea) is not sufficient for "agent" in this guide's
+sense — the model-as-policy requirement is doing real, load-bearing work,
+not decoration. A sixth, deliberately unmodeled predicate combination raises
+rather than silently misclassifying, because a real pattern (a retried fixed
+pipeline) genuinely doesn't fit any of the four labeled classes.
 
 ## 15. Chapter Deliverable
 
 [`agent_loop_reference.md`](agent_loop_reference.md) — a one-page reference
-defining the agent loop and its vocabulary (model, loop, tools, environment,
-action, observation, autonomy spectrum, agent-vs-pipeline, common
-misconceptions), written to be re-readable on its own without this README.
+defining the agent loop and its vocabulary, including the five-predicate
+decision procedure and both boundary cases, written to be re-readable on its
+own without this README.
 
 ## 16. Further Reading
 
 - Yao et al., *ReAct: Synergizing Reasoning and Acting in Language Models*
-  (2022/2023) — the reasoning-and-acting loop this guide's Chapter 3 traces in
-  detail; useful now for seeing an early, precise definition of the action/
-  observation cycle.
-- Wang et al., *Executable Code Actions Elicit Better LLM Agents* (CodeAct, 2024)
-  — the paper this whole guide is downstream of; Chapter 4 covers its thesis
-  directly, but it's worth skimming now for how it frames "agent" the same way
-  this chapter does (a loop over actions and observations), just with code as the
-  action space.
+  (2022/2023) — the reasoning-and-acting loop Chapter 3 traces in detail;
+  read now for an early, precise definition of the action/observation cycle
+  this chapter's `observation_reenters_model_context` predicate names.
+- Wang et al., *Executable Code Actions Elicit Better LLM Agents* (CodeAct,
+  2024) — frames "agent" the same way this chapter does (a loop over
+  actions and observations); Chapter 4 covers its thesis directly.
 - Anthropic, *Building Effective Agents* (engineering blog, 2024) — draws a
-  similar workflow-vs-agent distinction (fixed control flow vs. model-directed
-  control flow) in production terms; a good sanity check against this chapter's
-  `FIXED_PIPELINE` vs. `AUTONOMOUS_LOOP` split.
+  workflow-vs-agent distinction in production terms that maps closely onto
+  this chapter's `FIXED_PIPELINE` vs. `AUTONOMOUS_LOOP` split; useful for
+  seeing the same structural distinction argued from a production-systems
+  angle rather than a definitional one.
+- Any introductory control theory reference on closed-loop (feedback)
+  control systems — worth reading specifically because the thermostat
+  boundary case in this chapter is a real instance of a much older idea;
+  seeing how control theory formalizes "feedback loop" independently of any
+  learned policy sharpens exactly the distinction Section 5 makes.
