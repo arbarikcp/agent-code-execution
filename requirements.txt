@@ -10,3 +10,12 @@ ipykernel==7.3.0
 # Used only as an approximate, reproducible tokenizer for comparing action
 # spaces; not tied to any specific model the backbone agent will use.
 tiktoken==0.13.0
+
+# Chapter 5 — backbone agent's model-provider interface. litellm lets
+# BACKBONE_MODEL name any supported provider/model string (default here is
+# Groq's llama-3.3-70b-versatile) without changing backbone code.
+litellm==1.93.0
+
+# The backbone agent package itself (src/backbone_agent), installed editable
+# so `import backbone_agent` and `python -m backbone_agent` work repo-wide.
+-e .

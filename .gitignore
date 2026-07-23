@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .env
+keys.txt
+*.egg-info/
+chapters/ch05-minimal-code-executing-agent/code/workspace/average.txt
