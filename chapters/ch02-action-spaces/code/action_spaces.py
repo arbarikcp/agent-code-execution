@@ -1,17 +1,16 @@
-"""Action spaces, measured rather than asserted, on three fronts:
+"""Deterministic trace accounting for three action-space examples:
 
 1. A SCALING SWEEP: the "sum k files" task run across k=1..30, showing how
    JSON tool calling's cost grows with task size versus a code action's —
-   not just one snapshot at k=3 (the original version of this module), but
-   the actual curve.
-2. A REAL free-text parser run against 8 phrasings, to measure fragility as
-   a hit rate instead of asserting it by example.
-3. An HONEST boundary check: a HETEROGENEOUS task (three different
+   not just one snapshot at k=3.
+2. A small free-text parser run against 8 selected phrasings, demonstrating
+   missed and silently wrong extractions. This is not an accuracy benchmark.
+3. A boundary check: a HETEROGENEOUS task (three different
    operations, not one operation repeated k times) to see whether code's
-   advantage survives when the task can't be expressed as a generic loop —
-   it does on turn count, less cleanly on token count. Overclaiming "code
-   always wins" would be exactly the kind of unearned generality this
-   module should avoid.
+   trace changes when the task cannot be expressed as a generic loop.
+
+The module constructs messages and counts text. It does not call a model,
+execute the represented operations, measure latency, or estimate billing.
 """
 
 import re
@@ -280,7 +279,7 @@ def render_sweep(rows: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4. Honesty check: a HETEROGENEOUS task (no generic loop possible)
+# 4. Boundary check: a HETEROGENEOUS task (no generic loop possible)
 # ---------------------------------------------------------------------------
 
 HETEROGENEOUS_WORKSPACE = {"a.txt": "hello world", "b.txt": "python rocks", "c.txt": "one two three four"}
@@ -365,7 +364,7 @@ if __name__ == "__main__":
     is_rising = all(b[2] > a[2] for a, b in zip(deltas, deltas[1:]))
     print(f"  Strictly increasing at every step measured: {is_rising}")
 
-    print("\n=== 3. Honesty check: heterogeneous task (no generic loop possible) ===")
+    print("\n=== 3. Boundary check: heterogeneous task (no generic loop possible) ===")
     het_json = summarize(build_heterogeneous_json_trace())
     het_code = summarize(build_heterogeneous_code_trace())
     print(f"  JSON: {het_json['turns']} turns, {het_json['total_tokens']} tokens")

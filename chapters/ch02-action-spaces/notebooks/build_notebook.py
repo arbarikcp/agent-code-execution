@@ -13,17 +13,18 @@ cells = []
 cells.append(nbf.v4.new_markdown_cell(
 """# Chapter 2 — Action Spaces: Text, JSON, and Code
 
-Hands-on lab, pushed past the original "compare turns and tokens on one
-3-file task" direction into three real measurements:
+This lab uses deterministic, synthetic traces to make three mechanisms visible:
 
 1. A free-text parser's actual hit rate across 8 phrasings (not asserted fragility — measured).
 2. A full scaling sweep, k=1..30, with the MARGINAL token cost per additional
    file computed directly — enough to actually confirm superlinear growth,
    not just eyeball a ratio.
-3. An honesty check: does code's advantage survive when the task is
+3. A boundary check: does code's advantage survive when the task is
    heterogeneous (three different operations, no generic loop possible)?
 
-All from [`../code/action_spaces.py`](../code/action_spaces.py)."""
+All results come from [`../code/action_spaces.py`](../code/action_spaces.py).
+The lab does not call a model, measure task success or latency, account for
+provider caching, or estimate a provider bill."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -41,12 +42,15 @@ from action_spaces import (
 cells.append(nbf.v4.new_markdown_cell(
 """## 1. Free text — measured, not just illustrated
 
-`naive_parse_read_intent` is a first-draft parser: a two-word keyword list
+`naive_parse_read_intent` is a deliberately small first-draft parser: a two-word keyword list
 (`read`, `open`) plus a filename regex — the kind of thing a developer
 writes on the first pass, not an adversarially weak strawman. Run against 8
 phrasings, tracking three outcomes: `CORRECT`, `MISSED` (no filename found
 at all), and `WRONG` (a filename WAS found, but it's not the one intended —
-a worse failure than missing, because it looks successful)."""
+a worse failure than missing, because it looks successful).
+
+The eight handwritten examples demonstrate failure categories; they are not a
+representative benchmark of free-text parsing accuracy."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -61,9 +65,9 @@ print(f"\\n{n_correct} correct, {n_missed} missed, {n_wrong} wrong -- out of {le
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""**50% correct, on phrasings a human reads instantly and correctly, 100% of
-the time.** The `WRONG` case (`'lab notes.txt'`) matters more than the raw
-percentage: the parser confidently returns `'notes.txt'` — a plausible,
+"""The parser is correct on **4 of these 8 selected examples**. The `WRONG`
+case (`'lab notes.txt'`) matters more than the raw percentage: the parser
+returns `'notes.txt'` — a plausible,
 well-formed filename that is simply not the file the text named. A harness
 built on this parser wouldn't error out here; it would silently act on the
 wrong file. This is the concrete shape of "fragility": not "sometimes it
@@ -85,12 +89,13 @@ print(render_sweep(rows))"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""Code's token count is **exactly flat (296) at every k measured** — the
+"""In these sampled traces, code's token count is **296 at every k measured** — the
 generic loop `sum(int(read_file(f"f{i}.txt")) for i in range(k))` doesn't
-grow with k at all; only the digits of `k` itself change. JSON's token count
+does not grow with the number of repeated statements because there are no
+repeated statements; only the digits of `k` change. The structured trace's count
 grows from 891 to 27,455 — a 30.8x increase for a 30x increase in k, which
 LOOKS roughly linear from the ratio alone. Is it actually linear, or does
-that ratio hide something? Check the MARGINAL cost — how many extra tokens
+that ratio hide something? Check the marginal cost — how many extra tokens
 each additional file costs, not the cumulative total:"""
 ))
 
@@ -104,21 +109,23 @@ print(f"\\nMarginal cost strictly increasing at every step measured: {is_rising}
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""**The marginal cost per additional file rises monotonically: 370 -> 409 ->
+"""**Within this trace model, the marginal cost per additional file rises:
+370 -> 409 ->
 468 -> 565 -> 721 -> 974 -> 1,306 tokens.** File #30 costs 3.5x more, on
 its own, than file #2 did. This is the real mechanism, made visible instead
 of asserted: every file that's already been read gets RESENT in the context
 of every turn that comes after it (a stateless chat-completions call has no
 memory of its own — Chapter 6 covers why), so adding file k+1 doesn't just
 add file k+1's own read-and-observe cost, it also lengthens every one of the
-turns still to come. The 30.8x-for-30x-k ratio from the raw totals actually
-*understates* the effect, because the fixed prefix (system prompt + tool
-schema, paid once per turn regardless of k) dilutes the ratio at small k
-while the accelerating marginal cost dominates at large k."""
+turns still to come.
+
+This result is conditional on one call per turn and full represented history.
+Parallel calls, observation compaction, provider caching, and different
+tokenizers can change real latency and billed cost."""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 3. Honesty check — does code still win without a generic loop?
+"""## 3. Boundary check — what changes without a generic loop?
 
 Every code-wins result so far used a UNIFORM task (the same operation,
 repeated k times) — exactly the case a `for` loop compresses best. What
@@ -138,19 +145,15 @@ print(f"Token ratio: {het_json['total_tokens']/het_code['total_tokens']:.1f}x")"
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""Code still wins — 3.5x fewer turns, 7.3x fewer tokens — but the MECHANISM
-is different from the scaling sweep above. There, code won because one
-generic loop's SIZE didn't grow with k. Here, the code action's size DOES
+"""Under the same trace assumptions, code uses 3.5x fewer turns and 7.3x fewer
+counted tokens, but the mechanism differs from the scaling sweep. There, one
+generic loop's size did not grow with k. Here, the code action's size does
 reflect all three bespoke operations (three separate lines, not a loop) —
-its win comes purely from BUNDLING three unrelated operations into one
+its lower count comes from bundling three unrelated operations into one
 action, with no per-operation round trip, not from compression. This is the
-honest boundary of the composability claim: **code's turn-count advantage
-survives heterogeneity (bundling doesn't require uniformity); its
-token-count advantage is largest specifically when the task IS uniform
-enough to compress into a loop, and smaller — though still real here — when
-it isn't.** Claiming "code always wins by 90x" from the k=30 homogeneous
-result alone would have been an overclaim; this task shows a more modest,
-but still decisive, 7.3x."""
+boundary of the composability claim: **bundling does not require uniformity,
+but compression does.** The 7.3x figure compares constructed messages; it is
+not a claim about universal production cost or task success."""
 ))
 
 nb['cells'] = cells

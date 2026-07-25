@@ -25,17 +25,16 @@ and then deliberately tries to break the tool with two hard cases.
 
 Four questions, in order, each one a real fork:
 
-```
-1. Is the policy a language model?           NO ─► NON_MODEL_CONTROL_LOOP (thermostat)
-   │ YES
-2. Does the model choose the action,          NO ─► has hardcoded pipeline
-   or is it predetermined by a pipeline?           steps?  YES ─► FIXED_PIPELINE
-   │ YES                                            NO ─► SINGLE_CALL
-3. Does the loop repeat based on the          NO ─► SINGLE_TOOL_CALL
-   model's own output, with the result
-   re-entering ITS OWN next context?
-   │ YES
-4. -> AUTONOMOUS_LOOP
+```mermaid
+flowchart TD
+    A["1. Is the policy a language model?"] -->|NO| B["NON_MODEL_CONTROL_LOOP<br/>(thermostat)"]
+    A -->|YES| C["2. Does the model choose the action,<br/>or is it predetermined by a pipeline?"]
+    C -->|predetermined| D{"Has hardcoded<br/>pipeline steps?"}
+    D -->|YES| E["FIXED_PIPELINE"]
+    D -->|NO| F["SINGLE_CALL"]
+    C -->|model chooses| G["3. Does the loop repeat based on the<br/>model's own output, with the result<br/>re-entering ITS OWN next context?"]
+    G -->|NO| H["SINGLE_TOOL_CALL"]
+    G -->|YES| I["4. AUTONOMOUS_LOOP"]
 ```
 
 The critical discipline is: answer these from the system's **structure**,

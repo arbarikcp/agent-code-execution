@@ -28,18 +28,20 @@ never from its name — determine its class:
 5. **`observation_reenters_model_context`** — does the action's result come
    back to the SAME model, before its next call?
 
-```
-policy_is_a_language_model?
-  NO  -> NON_MODEL_CONTROL_LOOP (e.g. a thermostat)
-  YES -> model_chooses_the_action AND loop_repeats AND observation_reenters?
-           ALL YES -> AUTONOMOUS_LOOP
-           model_chooses_the_action=YES, but not both others -> SINGLE_TOOL_CALL
-           model_chooses_the_action=NO, loop_repeats=NO ->
-                has_hardcoded_pipeline_steps? YES -> FIXED_PIPELINE
-                                                NO -> SINGLE_CALL
-           model_chooses_the_action=NO but loop_repeats=YES -> undefined (raises);
-                a real pattern (a retried fixed pipeline) genuinely has no
-                home in this four-class taxonomy
+```mermaid
+flowchart TD
+    A["policy_is_a_language_model?"] -->|NO| B["NON_MODEL_CONTROL_LOOP<br/>(e.g. a thermostat)"]
+    A -->|YES| C["model_chooses_the_action?"]
+
+    C -->|YES| D["loop_repeats_based_on_model_output<br/>AND observation_reenters_model_context?"]
+    D -->|both YES| E["AUTONOMOUS_LOOP"]
+    D -->|not both| F["SINGLE_TOOL_CALL"]
+
+    C -->|NO| G["loop_repeats_based_on_model_output?"]
+    G -->|NO| H{"has_hardcoded_pipeline_steps?"}
+    H -->|YES| I["FIXED_PIPELINE"]
+    H -->|NO| J["SINGLE_CALL"]
+    G -->|YES| K["undefined (raises)<br/>a retried fixed pipeline genuinely has no<br/>home in this four-class taxonomy"]
 ```
 
 ## Two boundary cases that justify the predicates
