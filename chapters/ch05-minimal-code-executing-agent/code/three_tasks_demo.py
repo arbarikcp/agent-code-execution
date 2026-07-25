@@ -1,14 +1,13 @@
-"""Run the backbone agent (Chapter 5, v0) on three small tasks, for real, against
-a live model (Groq via litellm — see `../../../src/backbone_agent/model.py`).
+"""Optional live-model evaluation of the Chapter 5 agent on three small tasks.
 
-Per the chapter's hands-on direction: a math problem, a file transform, and an
-API-free data task. Each task is independently verified against a
-ground-truth computed by this script — not by trusting the agent's own claim.
+The tasks match the curriculum: computation, file transformation, and
+API-free data analysis. Each result is checked independently.
 
-Requires GROQ_API_KEY in the environment (see repo root .env, gitignored).
+Requires credentials for the provider selected by ``BACKBONE_MODEL``.
 """
 
 import csv
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -20,6 +19,16 @@ from backbone_agent import run_agent  # noqa: E402
 WORKSPACE = Path(__file__).resolve().parent / "workspace"
 SCORES_CSV = WORKSPACE / "scores.csv"
 AVERAGE_TXT = WORKSPACE / "average.txt"
+
+
+def numbers_in(text: str) -> list[float]:
+    """Extract standalone decimal numbers from a final answer."""
+    pattern = r"(?<![\w.])-?\d+(?:\.\d+)?(?!\w|\.\d)"
+    return [float(value) for value in re.findall(pattern, text)]
+
+
+def contains_number(text: str, expected: float, tolerance: float = 1e-9) -> bool:
+    return any(abs(value - expected) <= tolerance for value in numbers_in(text))
 
 
 def render_trace(messages: list[dict]) -> str:
@@ -50,7 +59,7 @@ def task_1_math() -> dict:
         n += 1
     expected = sum(primes)
 
-    success = str(expected) in answer
+    success = contains_number(answer, expected)
     return {
         "name": "math (sum of first 20 primes)",
         "task": task,
@@ -119,7 +128,8 @@ def task_3_data_stats() -> dict:
     expected_stdev = round(statistics.pstdev(values), 2)
 
     success = all(
-        str(v) in answer for v in (expected_mean, expected_median, expected_stdev)
+        contains_number(answer, expected, tolerance=0.005)
+        for expected in (expected_mean, expected_median, expected_stdev)
     )
     return {
         "name": "data task (mean/median/stdev of an inline list)",

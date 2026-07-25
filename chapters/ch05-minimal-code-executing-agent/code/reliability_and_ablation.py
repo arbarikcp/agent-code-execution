@@ -1,152 +1,139 @@
-"""Three deeper, real-live-model measurements beyond the original single-run
-hands-on tasks (`three_tasks_demo.py`):
+"""Deterministic checks for the five mechanics introduced in Chapter 5.
 
-1. Multi-trial reliability: run the math and data-stats tasks 3x each and
-   report a real pass@3-style success rate, instead of trusting one run.
-2. A prompt ablation: does one added sentence steering the model toward the
-   standard library reduce the real ModuleNotFoundError rate seen in
-   Chapter 5's original run? A/B'd over 4 live trials per prompt.
-3. A real step-budget boundary: call the file-transform task with
-   max_steps=1 and confirm StepBudgetExceeded actually fires, since even a
-   clean run needs a code action AND a separate final-answer turn.
+The filename is retained for compatibility with existing chapter links. Earlier
+versions ran repeated provider-specific prompt trials here. Those experiments
+obscured the chapter's purpose and required network access. This module now
+tests the loop itself:
 
-Requires GROQ_API_KEY in the environment — every measurement here is a real
-live call to groq/llama-3.3-70b-versatile via litellm.
+    generate -> extract -> execute -> observe -> repeat/finish
+
+Run from the repository root:
+    python chapters/ch05-minimal-code-executing-agent/code/reliability_and_ablation.py
 """
 
 import sys
-import time
+from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
-import litellm  # noqa: E402
-
 from backbone_agent import run_agent  # noqa: E402
-from backbone_agent.loop import SYSTEM_PROMPT, StepBudgetExceeded  # noqa: E402
+from backbone_agent.loop import StepBudgetExceeded  # noqa: E402
+from backbone_agent.parsing import extract_code  # noqa: E402
 
-from three_tasks_demo import task_1_math, task_2_file_transform, task_3_data_stats  # noqa: E402
-
-
-def _with_backoff(fn, *args, max_retries: int = 5, **kwargs):
-    """Groq's free tier has a real, low tokens-per-minute limit (observed:
-    12,000 TPM) that this chapter's multi-trial experiments hit directly —
-    a genuine finding, not a hypothetical. Retry with backoff rather than
-    silently failing the experiment; this is a local accommodation for
-    running many trials back-to-back, not the retry-policy design Chapter 22
-    covers properly.
-    """
-    for attempt in range(max_retries):
-        try:
-            return fn(*args, **kwargs)
-        except litellm.exceptions.RateLimitError:
-            wait = 5 * (attempt + 1)
-            print(f"    (rate limited, waiting {wait}s before retry {attempt + 1}/{max_retries})")
-            time.sleep(wait)
-    return fn(*args, **kwargs)  # final attempt, let it raise if it still fails
-
-ALT_SYSTEM_PROMPT = SYSTEM_PROMPT + (
-    "\nPrefer Python's standard library (e.g. csv, statistics, json) over "
-    "third-party packages like pandas or numpy — assume third-party packages "
-    "are NOT installed unless you have already confirmed otherwise this run."
-)
+Reply = str | Callable[[list[dict]], str]
 
 
-# ---------------------------------------------------------------------------
-# 1. Multi-trial reliability (pass@N-style, our own small measurement)
-# ---------------------------------------------------------------------------
+class ScriptedModel:
+    """Return fixed replies while allowing assertions about accumulated context."""
+
+    def __init__(self, *replies: Reply) -> None:
+        self._replies = iter(replies)
+        self.calls = 0
+
+    def __call__(self, messages: list[dict], model: str | None = None) -> str:
+        del model
+        self.calls += 1
+        reply = next(self._replies)
+        return reply(messages) if callable(reply) else reply
 
 
-def run_reliability_trials(task_fn, n_trials: int) -> dict:
-    successes = 0
-    step_counts = []
-    for _ in range(n_trials):
-        result = _with_backoff(task_fn)
-        successes += int(result["success"])
-        step_counts.append(sum(1 for m in result["messages"] if m["role"] == "assistant"))
-        time.sleep(2)  # pace requests under Groq's free-tier TPM limit
-    return {
-        "n_trials": n_trials,
-        "n_success": successes,
-        "success_rate": successes / n_trials,
-        "step_counts": step_counts,
-        "avg_steps": sum(step_counts) / len(step_counts),
-    }
+def run_with_script(task: str, scripted_model: ScriptedModel, **kwargs):
+    """Run the real agent loop while replacing only the external model call."""
+    with patch("backbone_agent.loop.call_model", scripted_model):
+        return run_agent(task, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# 2. Prompt ablation: does steering toward stdlib reduce the miss rate?
-# ---------------------------------------------------------------------------
+def check_code_extraction() -> None:
+    """The minimal parser extracts one fenced action and detects plain finish text."""
+    assert extract_code("```python\nprint(6 * 7)\n```") == "print(6 * 7)"
+    assert extract_code("The answer is 42.") is None
 
 
-def run_prompt_ablation(n_trials: int) -> dict:
-    def run_group(system_prompt) -> dict:
-        successes = 0
-        module_not_found_count = 0
-        step_counts = []
-        for _ in range(n_trials):
-            result = _with_backoff(task_2_file_transform, system_prompt=system_prompt)
-            successes += int(result["success"])
-            step_counts.append(sum(1 for m in result["messages"] if m["role"] == "assistant"))
-            hit_missing_module = any(
-                "ModuleNotFoundError" in m["content"]
-                for m in result["messages"] if m["role"] == "user"
-            )
-            module_not_found_count += int(hit_missing_module)
-            time.sleep(2)  # pace requests under Groq's free-tier TPM limit
-        return {
-            "n_trials": n_trials,
-            "n_success": successes,
-            "success_rate": successes / n_trials,
-            "module_not_found_rate": module_not_found_count / n_trials,
-            "avg_steps": sum(step_counts) / len(step_counts),
-            "step_counts": step_counts,
-        }
+def check_observation_feedback() -> None:
+    """Executed stdout must appear in context before the next model decision."""
 
-    return {
-        "default_prompt": run_group(None),
-        "stdlib_steered_prompt": run_group(ALT_SYSTEM_PROMPT),
-    }
+    def finish_after_observation(messages: list[dict]) -> str:
+        assert messages[-1] == {"role": "user", "content": "Observation:\n42\n"}
+        return "The final answer is 42."
 
-
-# ---------------------------------------------------------------------------
-# 3. A real step-budget boundary
-# ---------------------------------------------------------------------------
-
-
-def run_step_budget_boundary_demo() -> dict:
-    task = (
-        "Compute the sum of the first 20 prime numbers. "
-        "State the final numeric answer clearly."
+    model = ScriptedModel(
+        "```python\nprint(6 * 7)\n```",
+        finish_after_observation,
     )
+    answer, trace = run_with_script(
+        "Compute 6 * 7 with code.",
+        model,
+        return_trace=True,
+    )
+
+    assert answer == "The final answer is 42."
+    assert model.calls == 2
+    assert [message["role"] for message in trace] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+def check_error_recovery_path() -> None:
+    """A real traceback becomes an observation that can drive a corrected action."""
+
+    def fix_after_error(messages: list[dict]) -> str:
+        observation = messages[-1]["content"]
+        assert observation.startswith("Observation:\nTraceback")
+        assert "ZeroDivisionError" in observation
+        return "```python\nprint(10 / 2)\n```"
+
+    def finish_after_fix(messages: list[dict]) -> str:
+        assert messages[-1] == {"role": "user", "content": "Observation:\n5.0\n"}
+        return "The corrected result is 5.0."
+
+    model = ScriptedModel(
+        "```python\nprint(10 / 0)\n```",
+        fix_after_error,
+        finish_after_fix,
+    )
+    answer = run_with_script("Compute 10 / 2.", model)
+
+    assert answer == "The corrected result is 5.0."
+    assert model.calls == 3
+
+
+def check_termination_signal() -> None:
+    """Plain text without a fenced block is the v0 finish protocol."""
+    model = ScriptedModel("Finished without executing code.")
+    answer = run_with_script("Return a final response.", model)
+
+    assert answer == "Finished without executing code."
+    assert model.calls == 1
+
+
+def check_step_budget() -> None:
+    """The controller stops a model that keeps emitting actions."""
+    model = ScriptedModel("```python\nprint('still working')\n```")
+
     try:
-        run_agent(task, max_steps=1)
-        return {"raised": False}
-    except StepBudgetExceeded as e:
-        return {"raised": True, "message": str(e)}
+        run_with_script("Never finish.", model, max_steps=1)
+    except StepBudgetExceeded as error:
+        assert str(error) == "no final answer within 1 step"
+    else:
+        raise AssertionError("expected StepBudgetExceeded")
+
+
+CHECKS = [
+    ("code extraction", check_code_extraction),
+    ("observation feedback", check_observation_feedback),
+    ("error recovery path", check_error_recovery_path),
+    ("termination signal", check_termination_signal),
+    ("step budget", check_step_budget),
+]
 
 
 if __name__ == "__main__":
-    print("=== 1. Multi-trial reliability (3 trials each) ===")
-    math_reliability = run_reliability_trials(task_1_math, n_trials=3)
-    print(f"math task:  {math_reliability['n_success']}/{math_reliability['n_trials']} "
-          f"({math_reliability['success_rate']:.0%}), step counts: {math_reliability['step_counts']}")
-
-    stats_reliability = run_reliability_trials(task_3_data_stats, n_trials=3)
-    print(f"stats task: {stats_reliability['n_success']}/{stats_reliability['n_trials']} "
-          f"({stats_reliability['success_rate']:.0%}), step counts: {stats_reliability['step_counts']}")
-
-    print("\n=== 2. Prompt ablation: default vs. stdlib-steered (3 trials each) ===")
-    time.sleep(10)  # let the TPM window recover between experiment sections
-    ablation = run_prompt_ablation(n_trials=3)
-    for label, stats in ablation.items():
-        print(f"{label}: {stats['n_success']}/{stats['n_trials']} succeeded "
-              f"({stats['success_rate']:.0%}), "
-              f"ModuleNotFoundError hit rate: {stats['module_not_found_rate']:.0%}, "
-              f"avg steps: {stats['avg_steps']:.1f}, step counts: {stats['step_counts']}")
-
-    print("\n=== 3. Real step-budget boundary (max_steps=1 on a 2+-step task) ===")
-    boundary = run_step_budget_boundary_demo()
-    print(f"StepBudgetExceeded raised: {boundary['raised']}")
-    if boundary["raised"]:
-        print(f"  message: {boundary['message']}")
+    for name, check in CHECKS:
+        check()
+        print(f"PASS: {name}")

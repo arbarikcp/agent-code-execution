@@ -11,13 +11,19 @@ this module reads or stores a key directly.
 
 import os
 
-import litellm
-
 DEFAULT_MODEL = "groq/llama-3.3-70b-versatile"
 
 
 def call_model(messages: list[dict], model: str | None = None) -> str:
     """One model call: full message list in, assistant text out."""
+    try:
+        import litellm
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "Live model calls require the project dependencies. "
+            "Install them with `pip install -e .`."
+        ) from error
+
     model = model or os.environ.get("BACKBONE_MODEL", DEFAULT_MODEL)
     response = litellm.completion(
         model=model,

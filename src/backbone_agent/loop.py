@@ -81,4 +81,5 @@ def run_agent(
         observation = observation_from_result(result)
         messages.append({"role": "user", "content": f"Observation:\n{observation}"})
 
-    raise StepBudgetExceeded(f"no final answer within {max_steps} steps")
+    unit = "step" if max_steps == 1 else "steps"
+    raise StepBudgetExceeded(f"no final answer within {max_steps} {unit}")
