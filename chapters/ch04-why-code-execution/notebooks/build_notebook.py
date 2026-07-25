@@ -1,8 +1,7 @@
-"""One-off script that generates ch04_why_code_execution.ipynb via nbformat.
+"""Generate the Chapter 4 notebook from readable source.
 
-Not part of the chapter's runnable deliverables — kept only so the notebook's
-structure is reproducible/diffable from source instead of hand-edited JSON.
-Run: python build_notebook.py
+Run from this directory:
+    python build_notebook.py
 """
 
 import nbformat as nbf
@@ -11,15 +10,18 @@ nb = nbf.v4.new_notebook()
 cells = []
 
 cells.append(nbf.v4.new_markdown_cell(
-"""# Chapter 4 — Why Code Execution
+"""# Chapter 4 — Why Code Execution?
 
-Hands-on lab, pushed past a single 8-step-budget snapshot into four real
-measurements from [`../code/why_code.py`](../code/why_code.py):
+This lab examines four mechanisms behind code actions:
 
-1. The original step-budget benchmark (one budget, one snapshot).
-2. Does it generalize? A full SWEEP across budgets 3-24.
-3. Tool reuse and dynamic revision (unchanged from the original chapter).
-4. A real, measured non-determinism demonstration — not just asserted."""
+1. composition under a step budget;
+2. reuse of an available runtime library;
+3. interpreter errors as revision feedback;
+4. dependence on changing environment state.
+
+The first experiment is a deterministic protocol simulation, not a live-model
+success benchmark. The remaining examples execute real Python but use
+prewritten actions."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -35,26 +37,38 @@ from why_code import (
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 1. The original snapshot: one budget (8), one set of task sizes"""
+"""## 1. Step-budget feasibility
+
+For a `k`-file task, this simulation assumes a one-call-per-turn structured
+protocol needs `k + 2` steps, while one compound code action plus a final
+response needs 2. The table asks which sampled traces fit an eight-step limit."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
 """ks = [1, 3, 5, 6, 7, 10, 20]
 results = run_benchmark(ks, max_steps=8)
 print(render_benchmark_table(results))
+
 summary = summarize_benchmark(results)
 for approach, stats in summary.items():
-    print(f"{approach}: {stats['n_success']}/{stats['n_tasks']} succeeded "
-          f"({stats['success_rate']:.0%}), avg steps needed = {stats['avg_steps_needed']:.1f}")"""
+    print(
+        f"{approach}: {stats['n_fit']}/{stats['n_tasks']} traces fit "
+        f"({stats['fit_rate']:.0%}); average steps needed = "
+        f"{stats['avg_steps_needed']:.1f}"
+    )"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 2. Does the 57%-vs-100% gap generalize, or was budget=8 special?
+"""The fractions describe these selected task sizes under the stated formulas.
+No model chose actions, so they must not be reported as empirical task-success
+rates. Parallel calls or a batch-read tool would change the structured
+protocol."""
+))
 
-One snapshot (57% vs. 100%) invites an obvious question: is that ratio
-specific to `max_steps=8`, or does the pattern hold generally? Sweep the
-budget itself, from a tight 3 steps up to a generous 24, holding the same
-task sizes fixed."""
+cells.append(nbf.v4.new_markdown_cell(
+"""## 2. Sweep the budget
+
+Changing the budget exposes the boundary implied by the same formulas."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -63,64 +77,72 @@ print(render_budget_sweep(budget_sweep))"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""Code's success rate is **100% at every single budget tested**, including
-the tightest one (3 steps) — because a code action never needs more than 2
-steps regardless of task size, so any budget that could run an agent at all
-is already enough. JSON tool calling's success rate climbs monotonically
-with the budget — 14% -> 29% -> 57% -> 71% -> 86% -> 100% — only reaching
-parity with code once the budget (24) is generous enough to fit every task
-size in this particular test set. **The "max k JSON can fit" column makes
-the mechanism explicit: it's always exactly `budget - 2`**, because JSON
-needs `k+2` steps per task; there's nothing probabilistic or emergent about
-the curve — it's a direct, exact consequence of the two step-cost formulas
-(`k+2` vs. constant `2`). The 8-step snapshot from §1 is one point on this
-line, not a cherry-picked special case."""
+"""A structured trace fits when `k + 2 <= budget`; the code trace fits whenever
+`budget >= 2`. The curve is therefore algebraic, not probabilistic. As an
+extension, add a `read_many_files(paths)` tool and derive a new formula."""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 3. Tool reuse and dynamic revision (unchanged mechanics)"""
+"""## 3. Runtime library reuse
+
+The code action imports `statistics.mean`, which is already present in the
+Python runtime. No dedicated `compute_mean` tool is registered, although the
+runtime and import policy are still dependencies."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
 """mean_result = demo_tool_reuse()
 print(f"code action result: {mean_result}")
-print(f"JSON mode would first need a schema like:\\n  {HYPOTHETICAL_JSON_TOOL_SCHEMA_FOR_MEAN}")
-
-traceback_text, fixed_avg = demo_dynamic_revision()
-print(f"\\nFirst action's real traceback (tail): {traceback_text.strip().splitlines()[-1]}")
-print(f"Second action's result after the fix: {fixed_avg}")"""
+print(f"Example dedicated tool schema:\\n{HYPOTHETICAL_JSON_TOOL_SCHEMA_FOR_MEAN}")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""## 4. Non-determinism — measured, not just claimed
+"""A general calculator, batch-processing tool, or harness function could
+provide the same capability without arbitrary code. Code becomes more valuable
+when useful operations are numerous or difficult to enumerate in advance."""
+))
 
-The original chapter asserted "non-determinism" as a cost of code actions
-without demonstrating it. Here's a direct demonstration: run the exact same
-source text twice and check whether the output differs."""
+cells.append(nbf.v4.new_markdown_cell(
+"""## 4. Runtime feedback
+
+The first prewritten action divides by zero. The demo captures the real
+traceback, then runs a second prewritten action that handles zero safely."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
-"""r1, r2 = demo_nondeterminism()
-print(f"run 1: {r1}")
-print(f"run 2: {r2}")
-print(f"identical source code, different output: {r1 != r2}")"""
+"""traceback_text, fixed_avg = demo_dynamic_revision()
+print(f"Error observation: {traceback_text.strip().splitlines()[-1]}")
+print(f"Result from corrected action: {fixed_avg}")"""
 ))
 
 cells.append(nbf.v4.new_markdown_cell(
-"""Same source text (`import time; result = time.time()`), executed twice,
-genuinely different results — not because anything went wrong, but because
-`exec()` places no constraint at all on what a code action is allowed to
-call. A JSON tool-calling system's non-determinism, by contrast, is bounded
-by whatever tools were actually registered — if nobody registered a
-`get_current_time` tool, the agent has no way to introduce this specific
-non-determinism at all. This is the real, demonstrated shape of the
-"wider failure surface" cost side of Chapter 4's argument: not a
-hypothetical risk, a one-line reproduction."""
+"""This proves that an interpreter can supply actionable feedback. It does not
+prove that a live model will diagnose or repair the error correctly."""
 ))
 
-nb['cells'] = cells
+cells.append(nbf.v4.new_markdown_cell(
+"""## 5. Changing environment state
 
-with open("ch04_why_code_execution.ipynb", "w") as f:
-    nbf.write(nb, f)
+The same source reads the clock twice. Different results show that preserving
+source code alone is insufficient for reproducibility."""
+))
+
+cells.append(nbf.v4.new_code_cell(
+"""first, second = demo_nondeterminism()
+print(f"run 1: {first}")
+print(f"run 2: {second}")
+print(f"different observed values: {first != second}")"""
+))
+
+cells.append(nbf.v4.new_markdown_cell(
+"""This behavior is not unique to code: a structured time or network tool can
+also observe changing state. A narrow tool registry makes those capabilities
+explicit; a broad runtime may expose them through imports or system APIs."""
+))
+
+nb["cells"] = cells
+
+with open("ch04_why_code_execution.ipynb", "w") as notebook_file:
+    nbf.write(nb, notebook_file)
 
 print("wrote ch04_why_code_execution.ipynb")

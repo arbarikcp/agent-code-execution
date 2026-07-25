@@ -1,183 +1,123 @@
-# Why Code as an Agent's Action Space — Rationale and Benchmark Notes
+# Code as an Action Space: Decision Memo
 
-*Chapter 4 deliverable: a written rationale for code-as-action, with own benchmark notes.*
+## Recommendation
 
-## The thesis
+Use code actions when tasks require open-ended composition, local data
+processing, or reuse of runtime libraries. Use structured tools for small,
+stable, consequential effects that benefit from narrow validation and
+per-operation approval. Combine both when the task needs flexible computation
+and governed external mutations.
 
-Executable code should be the default action space for a multi-step,
-data-touching agent loop, because it is the only one of the three spaces
-compared in Chapter 2 where the *action itself* can carry composition, reuse
-existing code, and be corrected mid-task using the interpreter's own output.
-This is the CodeAct thesis (Wang et al., 2024, arXiv:2402.01030): "executable
-code actions elicit better LLM agents" by unifying the action space around
-code rather than a bespoke JSON schema per operation.
+## Why code can be the right choice
 
-## The published empirical claim (verified)
+| Benefit | Mechanism | Qualification |
+|---|---|---|
+| Composition | Loops, branches, functions, and variables live inside one action | Batch tools or workflows can provide similar composition |
+| Local data flow | Intermediate values stay in runtime memory | Requires suitable runtime state and observation design |
+| Library reuse | Code imports APIs already available in the environment | Dependencies and import policy still need management |
+| Runtime feedback | Exceptions and outputs become observations | Feedback enables repair but does not guarantee it |
+| Flexible tool combinations | One program can call several exposed capabilities | Broader capability requires stronger governance |
 
-Checked directly against the paper's arXiv abstract page in this session:
+## Evidence classification
 
-> CodeAct outperforms widely used alternatives — **up to 20% higher success
-> rate** — evaluated on the API-Bank benchmark and a newly curated benchmark,
-> across **17 LLMs**. The paper also introduces CodeActInstruct, an
-> instruction-tuning dataset of **7k multi-turn interactions**, to train
-> models specifically for code-action agentic behavior.
+The chapter contains three different kinds of evidence:
 
-The abstract does not state a specific step/action-count reduction figure, so
-none is claimed here beyond what the abstract says. This guide does not
-reproduce the paper's own benchmark (API-Bank plus 17 LLMs is out of scope for
-a toy chapter exercise); the notes below are a separate, much smaller,
-self-contained demonstration of the same underlying mechanism.
+### Protocol simulation
 
-## Our own benchmark notes
+For a uniform `k`-file task, the script assumes:
 
-Ran in this session via `code/why_code.py::run_benchmark`, task: sum k files,
-under a shared 8-step budget (a stand-in for a per-task step ceiling, per
-Chapter 27's eventual budget model). Full output reproduced from a real run:
-
-```
-  k | json steps | json ok | code steps | code ok
--------------------------------------------------
-  1 |          3 |    True |          2 |    True
-  3 |          5 |    True |          2 |    True
-  5 |          7 |    True |          2 |    True
-  6 |          8 |    True |          2 |    True
-  7 |          9 |   False |          2 |    True
- 10 |         12 |   False |          2 |    True
- 20 |         22 |   False |          2 |    True
-
-json_tool_calls: 4/7 succeeded (57%), avg steps needed = 9.4
-code_action:     7/7 succeeded (100%), avg steps needed = 2.0
+```text
+one-call-per-turn structured protocol: k reads + 1 write + 1 finish = k + 2
+one code-action protocol:            1 action + 1 finish            = 2
 ```
 
-**Reading this:** JSON tool calling needs `k + 2` steps (k reads + 1 write +
-1 final answer); a code action needs a constant 2 steps regardless of k. At
-k=6 JSON tool calling exactly fits the 8-step budget; at k=7 it needs 9 and
-fails outright, not degrades — the harness would cut it off mid-task. The code
-action never approaches the budget at any k tested. Every "success" above was
-checked against the true expected sum via an `assert` in `run_benchmark`, not
-just declared.
+Under an eight-step budget:
 
-**Scope of this claim:** this demonstrates the *mechanism* — a fixed step
-budget increasingly favors an action space whose step count doesn't grow with
-task size — on a deliberately small, deterministic toy task. It is not a
-claim about success rates on any real benchmark or with any real model; the
-"up to 20% higher success rate" figure above is the one number in this
-document backed by a real, independently published evaluation.
+| `k` | Structured steps | Fits? | Code steps | Fits? |
+|---:|---:|:---:|---:|:---:|
+| 1 | 3 | yes | 2 | yes |
+| 3 | 5 | yes | 2 | yes |
+| 5 | 7 | yes | 2 | yes |
+| 6 | 8 | yes | 2 | yes |
+| 7 | 9 | no | 2 | yes |
+| 10 | 12 | no | 2 | yes |
+| 20 | 22 | no | 2 | yes |
 
-### Does the 8-step snapshot generalize? A full budget sweep
+Four of seven sampled structured traces fit; all seven code traces fit. These
+fractions describe this chosen task set and protocol. They are not measured
+model success rates.
 
-One budget (8) is one point on a curve. `sweep_budgets()` sweeps the budget
-itself from 3 to 24, holding the same task sizes fixed:
+The budget sweep is equally mechanical:
 
-```
-budget |  json success rate |  code success rate | max k JSON can fit
----------------------------------------------------------------------
-     3 |               14% |              100% |                  1
-     4 |               14% |              100% |                  2
-     6 |               29% |              100% |                  4
-     8 |               57% |              100% |                  6
-    10 |               71% |              100% |                  8
-    12 |               86% |              100% |                 10
-    16 |               86% |              100% |                 14
-    24 |              100% |              100% |                 22
-```
+| Budget | Sampled structured tasks that fit | Sampled code tasks that fit |
+|---:|---:|---:|
+| 3 | 14% | 100% |
+| 4 | 14% | 100% |
+| 6 | 29% | 100% |
+| 8 | 57% | 100% |
+| 10 | 71% | 100% |
+| 12 | 86% | 100% |
+| 16 | 86% | 100% |
+| 24 | 100% | 100% |
 
-Code's success rate is **100% at every budget tested**, including the
-tightest (3 steps) — a code action never needs more than 2 steps regardless
-of task size. JSON's success rate climbs monotonically (14% → 29% → 57% →
-71% → 86% → 100%) as the budget loosens, reaching parity with code only once
-the budget is generous enough to fit every task size in the test set. The
-"max k JSON can fit" column is exactly `budget - 2` at every row — not a
-statistical pattern, a direct algebraic consequence of JSON's `k+2` step
-formula versus code's constant `2`. The original 57%-vs-100% result is one
-point on this line, not a cherry-picked snapshot.
+The result follows from the assumed formulas. Parallel calls, a batch read
+tool, a different finish protocol, or multiple code actions would change it.
 
-### Tool reuse (measured)
+### Scripted demonstrations
 
-`demo_tool_reuse()` runs `import statistics; result = round(statistics.mean(values), 2)`
-as a real code action against `values = [12, 7, 19, 3, 25]` and gets
-`result = 13.2` — computed via a stdlib function that was never registered as
-a tool. The JSON-mode equivalent would require defining and exposing a schema
-like:
+- `demo_tool_reuse()` executes `statistics.mean` from the standard library
+  without a dedicated mean-tool schema.
+- `demo_dynamic_revision()` captures a real `ZeroDivisionError` and then runs
+  a prewritten corrected action.
+- `demo_nondeterminism()` reads the clock twice and observes different values.
 
-```json
-{"name": "compute_mean", "description": "Compute the arithmetic mean of a list of numbers.",
- "parameters": {"type": "object", "properties": {"values": {"type": "array", "items": {"type": "number"}}}, "required": ["values"]}}
-```
+These runs demonstrate runtime mechanisms. They do not evaluate whether a live
+model would choose the right library, repair the exception, or produce
+reproducible code.
 
-*before* the model could perform this operation at all. Every new kind of
-computation an agent might need (mean, median, a regex, a date parse) is
-either already available to a code action (if the language/library has it) or
-requires a new schema, a new registration, and a new round trip to add to a
-JSON-mode agent.
+### Published evaluation
 
-### Dynamic revision (measured)
+The CodeAct paper reports evaluation across 17 language models on API-Bank and
+a newly curated benchmark, with improvements of up to 20 percentage points in
+success rate over the alternatives studied. That is the paper's result, not a
+result reproduced by this repository. See the
+[paper](https://arxiv.org/abs/2402.01030) for tasks, baselines, and experimental
+conditions.
 
-`demo_dynamic_revision()` runs a code action that genuinely raises
-`ZeroDivisionError` (dividing by a real `count.txt` value of `"0"`), captures
-the real traceback via `traceback.format_exc()`, and then runs a second code
-action — written to guard the zero-count case — that really succeeds,
-producing `avg = 0.0`. The observation that drove the fix (`ZeroDivisionError:
-division by zero`) is the interpreter's actual output, not a scripted string.
-This is the mechanical basis of Chapter 22's self-debugging loop: the
-interpreter itself supplies the signal an agent needs to correct course.
+## Costs and risks
 
-## Alignment with pretraining (not independently measured)
+| Cost | Practical consequence |
+|---|---|
+| Broader failure surface | Syntax, runtime, dependency, and generated-logic errors |
+| Partial effects | Early statements may succeed before a later failure |
+| Harder approval | Reviewers must understand compound behavior, not just arguments |
+| Resource use | Programs need time, memory, output, and step limits |
+| Reproducibility | Results may depend on files, packages, clocks, randomness, or services |
+| Containment burden | The runtime must restrict access beyond intended capabilities |
 
-The CodeAct paper's stated motivation includes that LLMs are extensively
-pretrained on code, giving them stronger prior competence at producing valid,
-well-formed code than at producing an arbitrary bespoke JSON schema invented
-for a specific tool set. This claim is about training-data composition and is
-not something this chapter can independently verify by running code — it is
-reported here as the paper's stated rationale, not as a number this guide
-measured.
+Runtime isolation is delegated to the sibling guide, *Code Execution
+Sandboxing for AI Agents*.
 
-## Costs and risks — non-determinism now measured, not just claimed
+## Decision checklist
 
-Code actions widen the failure surface relative to JSON tool calls:
+Choose code actions when most answers are “yes”:
 
-- **Non-determinism (measured).** `demo_nondeterminism()` executes the exact
-  same source text (`import time; result = time.time()`) twice and compares
-  the results:
+- Does the task require loops, branches, or substantial intermediate data?
+- Are useful libraries already available in a governed runtime?
+- Would individual tool calls create costly model-mediated orchestration?
+- Can results and side effects be verified?
+- Can execution be budgeted and contained?
 
-  ```
-  run 1: 1784809267.251519
-  run 2: 1784809267.251528
-  identical source, different output: True
-  ```
+Choose structured tools when most answers are “yes”:
 
-  Identical code, genuinely different output — not a hypothetical, a
-  one-line reproduction. `exec()` places no constraint on what a code action
-  can call; a JSON tool-calling system's non-determinism is bounded by
-  whatever was actually registered as a tool — if nobody registered a
-  time-reading tool, that specific non-determinism is simply unavailable to
-  the agent, by construction, not by discipline.
-- **Debugging cost.** A JSON tool call's effect is legible from its arguments
-  alone; a code action's effect requires reading (or running) the code, as
-  the tool-reuse and dynamic-revision demos above illustrate.
-- **Containment burden.** A code action can do anything the interpreter can
-  do — arbitrary filesystem access, network calls, subprocess spawning —
-  unless something constrains it. **This guide does not implement that
-  constraint.** Runtime isolation and sandboxing are the explicit subject of
-  the sibling guide, *Code Execution Sandboxing for AI Agents* — see Part XI
-  of this guide's own index for where the handoff happens formally.
-
-## When JSON tool calling is still the right choice
-
-Unchanged from Chapter 2's conclusion, restated with this chapter's evidence:
-a small, fixed, low-composition, high-auditability tool surface — or any
-context where no sandboxed code-execution environment is available — still
-favors JSON tool calls despite their token and step cost, precisely because
-their effects are legible from the call itself without executing anything.
+- Is the operation small, stable, and easy to describe with a schema?
+- Does each effect require separate authorization or audit?
+- Is arbitrary composition unnecessary or undesirable?
+- Would one batch or domain-specific tool solve the problem cleanly?
 
 ## Bottom line
 
-Composability (measured: 100% vs. 57% success under a shared step budget on a
-toy task), tool reuse (measured: an unregistered stdlib call working
-immediately), and dynamic revision (measured: a real traceback driving a real
-fix) are three concrete, runnable reasons code actions scale better than JSON
-tool calls as tasks grow in size and complexity — consistent with, though far
-smaller in scope than, the CodeAct paper's own verified "up to 20% higher
-success rate" result. The cost is a wider failure and containment surface,
-which this guide addresses at the loop-engineering level (Parts IV, VI, VII)
-and hands off entirely, for runtime isolation, to the sandbox guide.
+Code is valuable because it is a general composition language, not because it
+always uses fewer tokens or produces correct answers. Its adoption should be a
+deliberate exchange: greater flexibility and local computation in return for a
+larger execution, validation, and governance surface.

@@ -1,15 +1,8 @@
-"""Three runnable demonstrations backing Chapter 4's argument for code as an action space.
+"""Runnable illustrations for Chapter 4's code-as-action trade-offs.
 
-1. `run_benchmark` — reproduces a CodeAct-style comparison: the same "sum k files"
-   task, solved via JSON tool calls (one call per file) and via a single code
-   action, under a shared step budget. Real execution, real success/failure,
-   real step counts — this is OUR OWN toy benchmark, clearly distinct from and
-   much smaller than the CodeAct paper's own (see chapter README for the
-   paper's verified claim).
-2. `demo_tool_reuse` — shows a code action calling an existing stdlib function
-   with zero new registration, versus what JSON tool calling would require.
-3. `demo_dynamic_revision` — a code action that really fails, whose real
-   traceback informs a second code action that really succeeds.
+`run_benchmark` is a deterministic budget-fit simulation, not a live-model
+benchmark. The remaining functions demonstrate library reuse, interpreter
+feedback, and access to changing environment state.
 """
 
 import statistics
@@ -40,7 +33,7 @@ class BenchmarkResult:
     k: int
     approach: str
     steps_needed: int
-    success: bool
+    fits_budget: bool
     result_value: int | None
 
 
@@ -78,9 +71,9 @@ def run_benchmark(ks: list[int], max_steps: int) -> list[BenchmarkResult]:
         expected = sum(int(v) for v in build_workspace(k).values())
         json_result = run_json_tool_solver(k, max_steps)
         code_result = run_code_action_solver(k, max_steps)
-        if json_result.success:
+        if json_result.fits_budget:
             assert json_result.result_value == expected, "json solver produced wrong sum"
-        if code_result.success:
+        if code_result.fits_budget:
             assert code_result.result_value == expected, "code solver produced wrong sum"
         results.append(json_result)
         results.append(code_result)
@@ -91,24 +84,23 @@ def summarize_benchmark(results: list[BenchmarkResult]) -> dict[str, dict]:
     summary: dict[str, dict] = {}
     for approach in ("json_tool_calls", "code_action"):
         rows = [r for r in results if r.approach == approach]
-        n_success = sum(1 for r in rows if r.success)
+        n_fit = sum(1 for r in rows if r.fits_budget)
         summary[approach] = {
             "n_tasks": len(rows),
-            "n_success": n_success,
-            "success_rate": n_success / len(rows) if rows else 0.0,
+            "n_fit": n_fit,
+            "fit_rate": n_fit / len(rows) if rows else 0.0,
             "avg_steps_needed": sum(r.steps_needed for r in rows) / len(rows) if rows else 0.0,
         }
     return summary
 
 
 def sweep_budgets(budgets: list[int], ks: list[int]) -> dict[int, dict]:
-    """Success rate for both approaches, across a RANGE of step budgets.
+    """Fraction of sampled traces that fit each step budget.
 
     The single-budget (8) snapshot shows ONE point on a curve. This sweeps
     the budget itself, to answer: does the 57%-vs-100% gap from one budget
-    generalize, or was 8 a special case? A tight budget should hurt JSON
-    tool calling more (fewer k values fit); code should stay at ~100% for
-    any budget >= 2, since its step count never depends on k at all.
+    This is a direct consequence of the assumed step formulas, not a measured
+    task-success probability.
     """
     out: dict[int, dict] = {}
     for budget in budgets:
@@ -118,11 +110,11 @@ def sweep_budgets(budgets: list[int], ks: list[int]) -> dict[int, dict]:
 
 
 def render_budget_sweep(sweep: dict[int, dict]) -> str:
-    lines = [f"{'budget':>6} | {'json success rate':>18} | {'code success rate':>18} | {'max k JSON can fit':>18}"]
+    lines = [f"{'budget':>6} | {'json traces fitting':>18} | {'code traces fitting':>18} | {'max k JSON can fit':>18}"]
     lines.append("-" * len(lines[0]))
     for budget, summary in sweep.items():
-        json_rate = summary["json_tool_calls"]["success_rate"]
-        code_rate = summary["code_action"]["success_rate"]
+        json_rate = summary["json_tool_calls"]["fit_rate"]
+        code_rate = summary["code_action"]["fit_rate"]
         max_k_json = max(budget - 2, 0)  # JSON needs k+2 steps; largest k that fits this budget
         lines.append(f"{budget:>6} | {json_rate:>17.0%} | {code_rate:>17.0%} | {max_k_json:>18}")
     return "\n".join(lines)
@@ -130,20 +122,20 @@ def render_budget_sweep(sweep: dict[int, dict]) -> str:
 
 def render_benchmark_table(results: list[BenchmarkResult]) -> str:
     ks = sorted({r.k for r in results})
-    lines = [f"{'k':>3} | {'json steps':>10} | {'json ok':>7} | {'code steps':>10} | {'code ok':>7}"]
+    lines = [f"{'k':>3} | {'json steps':>10} | {'fits?':>7} | {'code steps':>10} | {'fits?':>7}"]
     lines.append("-" * len(lines[0]))
     by_key = {(r.k, r.approach): r for r in results}
     for k in ks:
         j = by_key[(k, "json_tool_calls")]
         c = by_key[(k, "code_action")]
         lines.append(
-            f"{k:>3} | {j.steps_needed:>10} | {str(j.success):>7} | {c.steps_needed:>10} | {str(c.success):>7}"
+            f"{k:>3} | {j.steps_needed:>10} | {str(j.fits_budget):>7} | {c.steps_needed:>10} | {str(c.fits_budget):>7}"
         )
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# 2. Tool reuse: calling an existing library function needs zero registration
+# 2. Runtime library reuse
 # ---------------------------------------------------------------------------
 
 # What JSON tool calling would require before the model could compute a mean:
@@ -159,10 +151,9 @@ HYPOTHETICAL_JSON_TOOL_SCHEMA_FOR_MEAN = {
 
 
 def demo_tool_reuse() -> float:
-    """A code action calls `statistics.mean` directly — a stdlib function nobody
-    registered as a tool — versus JSON mode needing a bespoke schema like
-    `HYPOTHETICAL_JSON_TOOL_SCHEMA_FOR_MEAN` defined and exposed in advance for
-    every new operation the agent might need.
+    """Call an available standard-library function without a dedicated tool.
+
+    The runtime and its import policy are still preconfigured dependencies.
     """
     values = [12, 7, 19, 3, 25]
     code = "import statistics\nresult = round(statistics.mean(values), 2)\n"
@@ -172,14 +163,14 @@ def demo_tool_reuse() -> float:
 
 
 # ---------------------------------------------------------------------------
-# 3. Dynamic revision: a real traceback informs a real fix
+# 3. Runtime feedback: capture an error, then run prewritten corrected code
 # ---------------------------------------------------------------------------
 
 
 def demo_dynamic_revision() -> tuple[str, float]:
-    """Run a code action that really raises ZeroDivisionError, capture its real
-    traceback as the observation, then run a second code action — informed by
-    that traceback — that really succeeds.
+    """Capture a real ZeroDivisionError, then run prewritten corrected code.
+
+    This demonstrates the feedback path, not autonomous model repair.
     """
     ws = {"count.txt": "0", "total.txt": "50"}
 
@@ -206,12 +197,12 @@ def demo_dynamic_revision() -> tuple[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# 4. Costs and risks, measured: non-determinism is real, not just asserted
+# 4. Changing environment state
 # ---------------------------------------------------------------------------
 
 
 def demo_nondeterminism() -> tuple[str, str]:
-    """Run the IDENTICAL code string twice and show the outputs really differ.
+    """Run identical code twice while reading a changing clock.
 
     A JSON tool call's schema constrains what CAN be called; a code action
     can call time.time(), a random source, or anything else non-deterministic
@@ -229,33 +220,33 @@ def demo_nondeterminism() -> tuple[str, str]:
 
 
 if __name__ == "__main__":
-    print("=== 1. Composability under an 8-step budget ===")
+    print("=== 1. Step-budget feasibility under an 8-step budget ===")
     ks = [1, 3, 5, 6, 7, 10, 20]
     results = run_benchmark(ks, max_steps=8)
     print(render_benchmark_table(results))
     summary = summarize_benchmark(results)
     for approach, stats in summary.items():
         print(
-            f"\n{approach}: {stats['n_success']}/{stats['n_tasks']} succeeded "
-            f"({stats['success_rate']:.0%}), avg steps needed = {stats['avg_steps_needed']:.1f}"
+            f"\n{approach}: {stats['n_fit']}/{stats['n_tasks']} traces fit "
+            f"({stats['fit_rate']:.0%}), avg steps needed = {stats['avg_steps_needed']:.1f}"
         )
 
-    print("\n=== 1b. Does the 8-step snapshot generalize? Sweep the budget itself ===")
+    print("\n=== 1b. Budget sweep ===")
     budget_sweep = sweep_budgets([3, 4, 6, 8, 10, 12, 16, 24], ks)
     print(render_budget_sweep(budget_sweep))
 
-    print("\n=== 2. Tool reuse (statistics.mean, zero registration) ===")
+    print("\n=== 2. Runtime library reuse (statistics.mean) ===")
     mean_result = demo_tool_reuse()
     print(f"code action result: {mean_result}")
     print(f"JSON mode would first need a schema like:\n  {HYPOTHETICAL_JSON_TOOL_SCHEMA_FOR_MEAN}")
 
-    print("\n=== 3. Dynamic revision (real traceback -> real fix) ===")
+    print("\n=== 3. Runtime feedback (real traceback -> prewritten fix) ===")
     traceback_text, fixed_avg = demo_dynamic_revision()
     print("First action's real traceback (tail):")
     print("  " + traceback_text.strip().splitlines()[-1])
     print(f"Second action's result after the fix: {fixed_avg}")
 
-    print("\n=== 4. Non-determinism, measured (identical code, two runs) ===")
+    print("\n=== 4. Changing environment state (identical code, two runs) ===")
     r1, r2 = demo_nondeterminism()
     print(f"run 1: {r1}")
     print(f"run 2: {r2}")
