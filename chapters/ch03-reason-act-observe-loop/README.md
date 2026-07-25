@@ -1,318 +1,433 @@
 # Chapter 3 — The Reason–Act–Observe Loop
 
+An agent rarely knows everything it needs at the start of a task. It must take
+an action, inspect what happened, and decide what to do next.
+
+```text
+Reason: I need the value in a.txt.
+Action: read_file("a.txt")
+Observation: 42
+Reason: Now I can use 42 to choose the next action.
+```
+
+That repeated feedback cycle is the foundation of an agent.
+
 ## 1. Concept
 
-**Reason-Act-Observe** is the interleaving pattern behind essentially every
-modern agent loop: Thought (reasoning), Action (based on that reasoning),
-Observation (the environment's real response), repeat until the model
-signals Finish. Chapter 1 named this cycle abstractly; this chapter gives
-it concrete shape by actually running it two ways — as a ReAct trace (text
-actions) and as a CodeAct trace (code actions) — and then goes further than
-either efficiency comparison: it constructs a real failure that ReAct is
-structurally vulnerable to and CodeAct structurally is not, and grounds that
-construction directly in a verified published claim (PAL's abstract).
+The **reason–act–observe loop** is a control loop in which a model:
+
+1. uses the current context to choose a next action;
+2. sends that action to an environment;
+3. receives the environment's result as an observation;
+4. repeats until it reaches a stopping condition.
+
+ReAct is an influential prompting pattern that interleaves model-generated
+reasoning traces with task-specific actions. This chapter uses its familiar
+`Thought → Action → Observation` notation because it makes the loop easy to
+inspect.
+
+The notation is not a requirement. Production systems may keep reasoning
+implicit, hidden, summarized, or represented as structured state. The essential
+mechanism is **action followed by observation-driven revision**.
 
 ## 2. Why This Matters for Code-Executing Agents
 
-Chapter 2 already showed code actions cost fewer tokens and turns. If that
-were the whole story, code actions would just be a cheaper way to do the
-same thing ReAct does. This chapter's real contribution is showing they're
-not just cheaper — they close off an entire class of error. That distinction
-matters because it changes what kind of claim you're making to someone
-deciding between action spaces: "code is more efficient" is a cost argument;
-"code structurally prevents this specific failure mode" is a correctness
-argument, and the two call for different levels of urgency.
+Generated code is only a proposal until it runs. Execution supplies evidence:
+
+- stdout and stderr;
+- return values;
+- changed files or state;
+- exceptions and exit status.
+
+The agent becomes useful when that evidence returns to the model and influences
+the next action. A syntax error can lead to corrected code. An unexpected file
+format can change the plan. A successful result can terminate the loop.
+
+Without observation feedback, code generation is a one-shot pipeline. With it,
+the system can adapt.
 
 ## 3. Mental Model
 
-```
-Thought (reason) → Action (act) → Observation (observe) → repeat
-    ▲                  ▲
-    │                  └── the only slot whose SHAPE changes ReAct → CodeAct
-    └── the only slot that's NEVER verified against ground truth in ReAct
+Treat the agent as a feedback controller, not as a long prompt.
+
+```mermaid
+flowchart LR
+    C[Context<br/>task + relevant history] --> M[Model chooses next action]
+    M --> G{Finish?}
+    G -->|yes| F[Return final answer]
+    G -->|no| V[Parse and validate action]
+    V --> E[Environment executes action]
+    E --> O[Observation]
+    O --> U[Update context]
+    U --> C
 ```
 
-The loop's rhythm is invariant. What §5 and §6 below establish is that the
-Thought slot in a ReAct trace is unverified by construction: the loop
-checks that an Action executes and produces a real Observation, but nothing
-checks that a Thought's claim about what an Observation means is correct.
-A CodeAct action doesn't have this exposed surface, because there's no
-freestanding "claim about the data" — only code that either runs (and is
-exact, by the language's own semantics) or raises.
+One iteration transforms state:
+
+```text
+(current context, chosen action)
+        ↓ environment
+(observation, updated context)
+```
+
+Three rules keep this model precise:
+
+- **Reason is a decision process, not ground truth.** A plausible explanation
+  can still be wrong.
+- **An observation is evidence, not success.** A command may run successfully
+  while producing the wrong result.
+- **Finish is an action.** The loop needs an explicit, testable way to stop.
 
 ## 4. Architecture (place in the loop / context)
 
-This chapter instantiates Chapter 1's abstract loop with concrete vocabulary
-and then stress-tests it. It sits directly upstream of:
+A minimal loop has six responsibilities:
 
-- **Chapter 4** ("Why Code Execution"), whose "dynamic revision" argument
-  (the interpreter's real error output drives a real fix) is the natural
-  complement to this chapter's finding: Chapter 4 shows code actions still
-  DO fail, and shows the loop recovering from an interpreter-reported error;
-  this chapter shows a class of failure that never even reaches the
-  interpreter in a ReAct trace, because it's a wrong Thought, not a wrong
-  Action.
-- **Chapter 5**, which builds a real (live-model) version of
-  `run_codeact_loop` — deliberately minimal here (no live model, no retry)
-  so Chapter 5's backbone has something concrete to extend.
-- **Chapter 22** (self-debugging), which assumes errors surface as
-  Observations the loop can act on — this chapter's failure class is the
-  cautionary counterexample: some errors (a wrong Thought) never surface as
-  an Observation at all, in either action space, unless something explicitly
-  checks for them.
+| Component | Responsibility |
+|---|---|
+| Context builder | Select the task, prior actions, and observations the model sees |
+| Model | Propose an action or finish response |
+| Parser | Convert model output into an executable request |
+| Validator | Reject malformed or disallowed actions |
+| Environment | Execute the action and capture its effects |
+| Controller | Append the observation, enforce limits, and repeat or stop |
+
+```mermaid
+sequenceDiagram
+    participant M as Model
+    participant H as Harness
+    participant E as Environment
+
+    H->>M: Task + current context
+    M-->>H: Action
+    H->>H: Parse and validate
+    H->>E: Execute action
+    E-->>H: Observation
+    H->>M: Updated context
+    M-->>H: Revised action or finish
+```
+
+The model does not directly operate on the world. The harness mediates every
+action and decides what observation re-enters context.
 
 ## 5. Detailed Explanation
 
-**ReAct, and where its correctness actually lives.**
-`code/react_vs_codeact.py`'s `run_react_loop` calls a (scripted) model,
-executes the returned action for real, and threads the real observation
-back into context. The mechanism is airtight for the ACTION/OBSERVATION
-pair — `TOOLS[step.action](step.action_input)` is a real function call with
-a real, correct return value, every time. What's NOT verified is the
-THOUGHT: `step.thought` is appended to context as-is, with no check that it
-correctly characterizes anything. This is not a bug in the implementation —
-it's a structural property of free-text reasoning: there's no schema for a
-Thought to conform to, so nothing CAN check it mechanically.
+### 5.1 Anatomy of one iteration
 
-**The constructed failure: two 6-file scripts, one flipped comparison.**
-`CORRECT_LONG_REACT_SCRIPT` and `FLAWED_LONG_REACT_SCRIPT` share identical
-actions and identical (real, correct) observations at every step. They
-differ at exactly one Thought: after observing `d.txt` = 55 (correctly), the
-flawed script's Thought states "That's less than 42" — a plain
-misjudgment, the kind a real model can plausibly make on a long chain of
-text-based comparisons. Every subsequent Thought in the flawed script trusts
-this wrong "running max" and continues comparing against it. The final
-`Finish` answer is `a.txt`/`42`/`52` — wrong; ground truth (computed
-independently via Python's own `max()` over `LONG_WORKSPACE`, not from
-either script) is `d.txt`/`55`/`65`. Verified directly: every Observation in
-the flawed trace matches `LONG_WORKSPACE` exactly; only the Finish answer is
-wrong. This demonstrates, rather than asserts, that a ReAct loop's own
-machinery cannot distinguish a run with a wrong Thought from a run without
-one — both look identical from the loop's perspective (every action
-succeeded, every observation was real).
+Consider this task:
 
-**CodeAct's structural immunity to this specific class.**
-`run_long_codeact_loop` performs the identical 6-file task as one action:
-`max(values, key=values.get)`. There is no "running max" claim anywhere in
-generated text for a later step to misremember, because there is no later
-step — the entire comparison happens in one call to an exact language
-primitive. This doesn't make code actions bug-free (see Chapter 4's dynamic
-revision demo for a real code failure and recovery) — it means this
-SPECIFIC failure shape (correct facts, silently wrong accumulated
-interpretation of them, propagating across steps) has no surface to occur
-on inside a single, non-iterative code action.
+> Which of `a.txt`, `b.txt`, and `c.txt` contains the largest integer, and what
+> is that integer plus 10?
 
-**This isn't a hypothetical — PAL's abstract names it directly.** Checked
-against the arXiv abstract page this session: PAL (Gao et al., 2022) states
-*"LLMs often make logical and arithmetic mistakes in the solution part,
-even when the problem is decomposed correctly"* — precisely the shape of
-the constructed failure above (the flawed script's DECOMPOSITION was
-correct — it checked every file, in the right order — only its ARITHMETIC
-at one step was wrong). PAL's verified fix and result: *"PAL using Codex
-achieves state-of-the-art few-shot accuracy on the GSM8K benchmark ...
-surpassing PaLM-540B which uses chain-of-thought by absolute 15% top-1"* —
-a real, published, benchmarked number for exactly the "offload the
-arithmetic to an interpreter" mechanism this chapter's CodeAct trace uses.
+A ReAct-style trace may begin:
 
-**Multi-turn iteration and observation feedback**, mechanically: each
-`context += f"\nAction: ...\nObservation: {observation}"` line in
-`run_react_loop` is what makes prior turns visible to later ones — remove it
-and even the CORRECT script would fail, because nothing would remember
-`a.txt` was 42 by the time c.txt is being compared. This is Chapter 1's
-`observation_reenters_model_context` predicate, implemented as one line of
-string concatenation, and it's exactly as unable to distinguish "a
-correctly observed fact" from "a wrong claim about that fact" as the rest of
-the loop.
+```text
+Thought: I need the file values. Start with a.txt.
+Action: read_file("a.txt")
+Observation: 42
+```
 
-**Related lineage.** `HISTORICAL_TIMELINE` now carries direct abstract
-quotes rather than paraphrases for all four papers (ReAct, PAL, Toolformer,
-CodeAct) — see `loop_lineage_diagram.md` §5 for the full annotated
-timeline with every quote and date checked this session.
+Each field has a different role:
+
+- `Thought` records the model's current rationale in this teaching example.
+- `Action` is the request the harness can parse and execute.
+- `Observation` is produced by the environment, not invented by the model.
+
+The next model call must include the observation, directly or through managed
+state. Otherwise the model cannot reliably adapt to the result.
+
+### 5.2 Context is the loop's working state
+
+Models do not automatically share the harness's state. The controller must
+construct the next input:
+
+```python
+context += (
+    f"\nAction: {action.name}({action.argument!r})"
+    f"\nObservation: {observation}"
+)
+```
+
+This simple append-only strategy is adequate for a small example. Long-running
+agents need selection, truncation, summarization, or external state because
+unbounded transcripts become expensive and noisy. Later chapters address those
+context-engineering choices.
+
+An observation should contain enough information to guide the next decision,
+but not every byte the environment produced. For a command, that often means
+exit status, bounded stdout/stderr, duration, and a concise description of side
+effects.
+
+### 5.3 Multi-turn adaptation
+
+Iteration matters when later actions depend on earlier results:
+
+```text
+read configuration
+    ↓
+choose parser based on file format
+    ↓
+run parser
+    ↓
+repair code if execution fails
+    ↓
+verify output and finish
+```
+
+A fixed workflow can handle known branches. A model-driven loop is useful when
+the appropriate next action cannot be fully specified in advance. That
+flexibility must be bounded with step, time, token, and effect limits.
+
+### 5.4 ReAct and CodeAct share the loop
+
+ReAct and CodeAct differ mainly in the action language.
+
+**ReAct-shaped example**
+
+```text
+Action 1: read_file("a.txt") → 42
+Action 2: read_file("b.txt") → 17
+Action 3: read_file("c.txt") → 8
+Finish: a.txt contains 42; 42 + 10 = 52
+```
+
+**CodeAct-shaped example**
+
+```python
+values = {
+    path: int(read_file(path))
+    for path in ["a.txt", "b.txt", "c.txt"]
+}
+largest = max(values, key=values.get)
+print(largest, values[largest] + 10)
+```
+
+The CodeAct action bundles the reads and comparison, but it still produces an
+observation. If the program fails or exposes new information, the loop can emit
+another code action. CodeAct changes how much work fits inside one action; it
+does not remove reason–act–observe iteration.
+
+### 5.5 A failure that correct observations do not prevent
+
+The runnable example includes two scripted six-file traces. Both receive the
+same correct file values. One trace nevertheless claims that `55 < 42`, keeps
+the wrong running maximum, and returns the wrong answer.
+
+This demonstrates a narrow but important point:
+
+> A loop can verify that an action executed and still fail because the model
+> interpreted the observation incorrectly.
+
+Code can reduce manual arithmetic or state tracking by delegating it to an
+interpreter. It does not guarantee correctness. Generated code could use
+`min()` instead of `max()`, parse a value incorrectly, or omit a file. The
+advantage is that deterministic operations can be made explicit and tested.
+
+The appropriate response is verification:
+
+- assert expected properties;
+- inspect important side effects;
+- compare results through an independent check where practical;
+- treat successful execution as evidence, not proof.
+
+### 5.6 Termination
+
+A loop must stop for one of three broad reasons:
+
+1. **Success:** the model emits a valid finish action and required checks pass.
+2. **Failure:** an error is unrecoverable or a retry policy is exhausted.
+3. **Budget:** a step, time, token, or cost limit is reached.
+
+“The model said it is done” is not always sufficient. For important tasks, the
+harness should verify deliverables or postconditions before accepting finish.
+
+### 5.7 Historical lineage
+
+The relevant ideas developed along related but distinct paths:
+
+```mermaid
+timeline
+    title From interleaved actions to executable code actions
+    2022 : ReAct — interleave reasoning traces and environment actions
+         : PAL — generate programs and delegate computation to a runtime
+    2023 : Toolformer — train a model to decide when and how to call APIs
+    2024 : CodeAct — use executable code as the action inside an iterative agent
+```
+
+- **ReAct** established a widely used pattern for interleaving reasoning and
+  task-specific actions.
+- **PAL** focused on program-aided reasoning: the model generates a program and
+  delegates computation to an interpreter.
+- **Toolformer** addressed a different question—learning when and how to invoke
+  external APIs.
+- **CodeAct** placed executable Python actions inside an iterative agent loop.
+
+This is a conceptual lineage, not a claim that each work directly extends the
+previous one.
 
 ## 6. Minimal Implementation
 
-`code/react_vs_codeact.py`:
+The core control flow can be expressed without committing to a provider:
 
-- `ReActStep`, `REACT_SCRIPT`, `ScriptedReActModel`, `run_react_loop` — the
-  original 3-file ReAct loop.
-- `CODEACT_THOUGHT`, `CODEACT_CODE`, `run_codeact_loop` — the original
-  3-file CodeAct rewrite.
-- `LONG_WORKSPACE`, `CORRECT_LONG_REACT_SCRIPT`,
-  `FLAWED_LONG_REACT_SCRIPT`, `run_long_react_loop`,
-  `run_long_codeact_loop` — the constructed 6-file failure-class
-  demonstration.
-- `HISTORICAL_TIMELINE` (with verified direct quotes), `render_timeline()`.
+```python
+context = [task]
 
-Run it directly:
+for step in range(max_steps):
+    decision = model(context)
+
+    if decision.is_finish:
+        return validate_final_answer(decision.answer)
+
+    action = parse_and_validate(decision.action)
+    observation = environment.execute(action)
+    context.append({"action": action, "observation": observation})
+
+raise StepLimitExceeded(max_steps)
+```
+
+The chapter implementation uses a scripted model so the behavior is
+deterministic:
 
 ```bash
 source .venv/bin/activate
 python chapters/ch03-reason-act-observe-loop/code/react_vs_codeact.py
 ```
 
-```
-=== A real failure class: correct Observations, wrong Thought-level arithmetic ===
-Ground truth (computed independently): d.txt has the largest number (55); 55 + 10 = 65.
+[`code/react_vs_codeact.py`](code/react_vs_codeact.py) contains:
 
-CORRECT ReAct script finish:  'd.txt has the largest number (55); 55 + 10 = 65.'
-  matches ground truth: True
+- a runnable ReAct-style loop with real in-memory tool calls;
+- a CodeAct-style loop that executes a fixed code action;
+- correct and flawed traces for the six-file failure demonstration;
+- a compact historical timeline.
 
-FLAWED ReAct script finish:  'a.txt has the largest number (42); 42 + 10 = 52.'
-  matches ground truth: False  <- wrong, despite every Observation being correct
-  every Observation in the flawed trace was still correct: True
-
-CodeAct (max() delegated to the interpreter): 'd.txt has the largest number (55); 55 + 10 = 65.'
-  matches ground truth: True
-```
+There is no live model call yet. Chapter 5 introduces one.
 
 ## 7. Hands-on Lab
 
-`notebooks/ch03_react_vs_codeact.ipynb` (executed, committed with outputs)
-runs both the original 3-file comparison and the full 6-file
-correct-vs-flawed-vs-CodeAct demonstration, printing the exact Thought where
-the two 6-file scripts diverge side by side, then verifying the flawed
-trace's observations were all individually correct despite its wrong
-Finish answer.
+Run [`notebooks/ch03_react_vs_codeact.ipynb`](notebooks/ch03_react_vs_codeact.ipynb).
+It compares the two action shapes and exposes the incorrect-running-maximum
+failure.
 
-To extend it yourself: write a THIRD 6-file script where the flaw is in a
-different failure shape — e.g., correctly tracking the max but making an
-arithmetic slip in the final `+ 10` — and check whether that failure is
-"louder" (easier to catch by inspection) or "quieter" (easier to miss) than
-the running-max misjudgment used here.
+Then perform these experiments:
+
+1. Remove observations from the accumulated context. Explain why the scripted
+   model hides the resulting problem and how a live model would differ.
+2. Change the code action from `max()` to `min()` and observe that successful
+   execution does not imply correctness.
+3. Add a postcondition that independently checks the selected maximum.
+4. Set `max_steps` below the required number of ReAct actions and inspect the
+   termination failure.
 
 ## 8. Failure Lab
 
-The constructed failure above (§5-6) IS the failure lab for this chapter —
-run, not just described. A second, related failure worth reproducing
-yourself: break `run_react_loop`'s context-concatenation line (comment out
-`context += ...`) and rerun `CORRECT_LONG_REACT_SCRIPT`. Because
-`ScriptedReActModel` plays back a fixed script regardless of context, no
-exception occurs — but if the model were live instead of scripted, this
-would be indistinguishable from the flawed-Thought failure from the loop's
-external behavior (a wrong final answer despite correct individual
-Observations), even though the underlying cause is completely different
-(no memory at all, vs. a specific wrong claim). This is worth sitting with:
-two structurally different bugs (missing feedback vs. a wrong Thought) can
-produce externally identical symptoms, which is exactly why Chapter 59's
-tracing/observability work cares about capturing the full Thought/Action/
-Observation sequence, not just the final answer.
+The included flawed trace isolates an interpretation error:
+
+```text
+Observation: d.txt contains 55
+Thought: 55 is less than 42, so the maximum remains 42
+```
+
+The environment is correct; the model state is not. The loop carries the error
+forward because no postcondition checks the final answer.
+
+Now consider three failures that can look similar externally:
+
+| Symptom | Possible cause |
+|---|---|
+| Wrong final answer | Incorrect reasoning or incorrect generated code |
+| Repeated action | Observation omitted, unclear, or ignored |
+| Loop never finishes | Missing stop signal, parser mismatch, or ineffective recovery |
+
+Full traces help distinguish them. Final answers alone do not.
 
 ## 9. Instrumentation (what to log / trace / measure)
 
-Beyond turn/entry counts (Chapter 2's territory): for a ReAct-shaped loop
-specifically, consider whether any Thought's claim can be cross-checked
-against the Observations already in context — even a cheap heuristic check
-(does the Thought's stated "current max" match the actual maximum of
-observed values so far?) would have caught this chapter's constructed
-failure without needing a smarter model. `run_long_react_loop`'s transcript
-already contains everything needed for such a check post-hoc; nothing in
-this chapter implements one, which is itself worth noting as a gap.
+For every iteration, record:
+
+- run ID, step number, and timestamp;
+- model request identifier and action;
+- parser and validation result;
+- tool/runtime start, duration, and status;
+- bounded observation returned to context;
+- context size before the next call;
+- finish reason;
+- side effects and verification result.
+
+Avoid treating hidden reasoning as a required observability surface. Log the
+decisions, actions, observations, and state transitions needed to reproduce and
+debug behavior.
 
 ## 10. Design Considerations
 
-- **"Fewer tokens" and "fewer failure modes" are different claims, and
-  conflating them weakens both.** Chapter 2 established the former with
-  real numbers; this chapter establishes the latter with a real constructed
-  case tied to a verified published result (PAL). Keep the two arguments
-  separate when explaining to someone why code actions are the default.
-- **A loop's correctness guarantees only extend as far as what it actually
-  verifies.** `run_react_loop` verifies that actions execute and observations
-  are real; it does NOT verify that Thoughts correctly interpret those
-  observations. Any system built on this loop shape inherits that exact gap
-  unless something is added specifically to close it (see §9).
-- **Constructing a failure case is more convincing than asserting a paper's
-  claim.** This chapter could have simply cited PAL's abstract. Building a
-  concrete, mechanically-verified instance of the failure it describes
-  makes the claim inspectable rather than just cited.
+- **Observation design:** Too little feedback prevents recovery; too much
+  feedback consumes context and can distract the model.
+- **State ownership:** Keep authoritative task state in the harness or
+  environment rather than relying solely on prose history.
+- **Validation:** Validate action shape before execution and outcomes before
+  accepting completion.
+- **Bounded autonomy:** Apply step, time, token, and effect budgets.
+- **Idempotency:** Retried actions should not accidentally duplicate effects.
+- **Determinism:** Scripted models are useful for testing loop mechanics, but
+  they cannot demonstrate live-model quality.
 
 ## 11. Common Mistakes
 
-- **Believing a full, coherent-looking Thought chain guarantees a correct
-  answer.** The flawed script's Thoughts are fluent and locally
-  plausible at every step — the error is only visible by checking against
-  ground truth, not by reading the trace for "does this sound reasoning-y."
-- **Treating code actions as immune to error rather than immune to THIS
-  error.** §5's claim is scoped precisely: this failure CLASS (correct
-  facts, wrong accumulated interpretation across steps) is structurally
-  unavailable to a single code action; other failure classes (Chapter 4's
-  dynamic-revision demo) are not.
-- **Citing PAL's claim without checking whether your own system actually
-  exhibits the mechanism.** This chapter didn't just cite "PAL says code
-  helps arithmetic" — it built a case where that specific claim is true, at
-  a specific, inspectable step.
+- Calling any chain of model calls “ReAct” even when no observation changes the
+  next decision.
+- Assuming the model remembers an observation that was never returned in
+  context or managed state.
+- Treating a successful action as proof that the task succeeded.
+- Assuming explicit thought text is required for an agent loop.
+- Letting the model be the sole judge of completion.
+- Omitting a maximum-step or timeout condition.
+- Claiming that code eliminates reasoning errors rather than moving some
+  operations into an executable, testable form.
 
 ## 12. Comparisons / Alternatives
 
-| | ReAct-shaped loop | CodeAct-shaped loop |
-|---|---|---|
-| Actions needed (3-file task) | 3 | 1 |
-| Where comparison logic lives | Thought text, re-derived each turn, unverified | One interpreter call, exact by construction |
-| Vulnerable to "correct facts, wrong accumulated interpretation"? | Yes — demonstrated in §5-6 | No — no accumulated textual claim exists to be wrong |
-| Still vulnerable to other bugs? | Yes | Yes (Chapter 4's dynamic-revision demo) |
-| Published evidence | PAL: "logical and arithmetic mistakes in the solution part... even when decomposed correctly" | PAL: 15% absolute GSM8K improvement over CoT via interpreter offload |
+| Pattern | Control | Best fit | Limitation |
+|---|---|---|---|
+| One-shot generation | Model responds once | Simple, fully specified tasks | Cannot adapt to execution results |
+| Fixed workflow | Application owns all branches | Stable, repeatable processes | Cannot choose novel paths |
+| ReAct-style loop | Model chooses among bounded actions | Interactive search and tool use | More turns; reasoning may misinterpret observations |
+| CodeAct-style loop | Model emits composable code actions | Multi-step computation and tool composition | Broader execution and validation surface |
+| Hybrid loop | Workflow governs stages; model chooses locally | Production systems needing flexibility and control | More design complexity |
 
 ## 13. Review Questions
 
-1. In the flawed 6-file script, exactly which step's Thought is wrong, and
-   what specifically does it get wrong — the file it checks, the value it
-   observes, or the comparison it makes?
-2. Why does `run_react_loop` have no way to detect the flawed script's error
-   at the time it happens, even in principle, given the code as written?
-3. PAL's mechanism (offload computation to an interpreter) is a single
-   generate-then-execute step, not an iterated loop like ReAct. Why does
-   this chapter still treat PAL's finding as directly relevant to a
-   MULTI-STEP ReAct trace's failure mode?
-4. Propose one instrumentation change to `run_react_loop` (not a model
-   change) that would have caught the flawed script's error automatically,
-   without needing the ground truth in advance.
-5. Is there a failure shape that a CodeAct action IS vulnerable to that a
-   ReAct trace structurally is not, symmetric to this chapter's finding?
-   (Hint: think about what "no intermediate checkpoint" costs, not just
-   what it saves — Chapter 8's rich-observation-capture material is a clue.)
+1. Which parts of the loop are produced by the model, harness, and environment?
+2. Why is an observation necessary but not sufficient for correctness?
+3. What changes—and what stays the same—between ReAct and CodeAct?
+4. Why does the scripted model fail to test whether context actually influences
+   the next action?
+5. Name three valid termination paths.
+6. What information should a command-execution observation contain?
+7. How would you verify a finish action for the three-file task?
 
 ## 14. Chapter Summary
 
-Reason-Act-Observe is the shared rhythm behind ReAct and CodeAct; what
-changes between them is the Action's shape (Chapter 2's territory) and,
-this chapter shows, the loop's exposure to a specific failure class. A
-constructed pair of 6-file ReAct scripts — sharing identical, individually
-correct Observations, differing at exactly one Thought's arithmetic — showed
-the loop finishing with a confidently wrong answer, because nothing in
-ReAct's mechanism verifies a Thought's claim against the data it interprets.
-The equivalent CodeAct action, delegating the same comparison to `max()`,
-has no surface for this failure to occur on. This is not speculation: PAL's
-own abstract (verified quote) names exactly this failure mode — "logical and
-arithmetic mistakes in the solution part, even when the problem is
-decomposed correctly" — and reports a verified 15% absolute accuracy
-improvement on GSM8K from the same offload-to-interpreter mechanism this
-chapter's CodeAct trace uses. The lineage (ReAct → PAL → Toolformer →
-CodeAct) is now grounded in direct abstract quotes rather than paraphrase.
+An agent is a feedback loop: choose an action from current context, execute it,
+observe the result, update state, and repeat. ReAct made the interleaving of
+reasoning traces and actions explicit. CodeAct retains the loop but makes
+executable code the action.
+
+Observations enable adaptation, not automatic correctness. The harness must
+manage state, validate actions, bound iteration, capture useful observations,
+and verify completion. Those responsibilities—not the `Thought:` label—turn a
+sequence of model calls into a reliable agent loop.
 
 ## 15. Chapter Deliverable
 
-[`loop_lineage_diagram.md`](loop_lineage_diagram.md) — the annotated
-Reason-Act-Observe loop diagram, the ReAct-shaped vs. CodeAct-shaped worked
-comparison, the constructed correct-vs-flawed failure-class demonstration
-grounded in PAL's verified abstract claim, and the ReAct → PAL → Toolformer
-→ CodeAct lineage with direct quotes.
+[`loop_lineage_diagram.md`](loop_lineage_diagram.md) contains the annotated
+loop, side-by-side ReAct and CodeAct traces, and the conceptual lineage from
+ReAct through program-aided and learned tool use to CodeAct.
 
 ## 16. Further Reading
 
-- Yao, Zhao, Yu, Du, Shafran, Narasimhan, Cao, *ReAct: Synergizing Reasoning
-  and Acting in Language Models*, arXiv:2210.03629 (2022-10-06).
-- Gao, Madaan, Zhou, Alon, Liu, Yang, Callan, Neubig, *PAL: Program-aided
-  Language Models*, arXiv:2211.10435 (2022-11-18) — read the abstract
-  directly; its claim about "logical and arithmetic mistakes in the solution
-  part" and the verified 15%-absolute GSM8K result are this chapter's most
-  load-bearing citation, not background color.
-- Schick, Dwivedi-Yu, Dessi, Raileanu, Lomeli, Zettlemoyer, Cancedda,
-  Scialom, *Toolformer: Language Models Can Teach Themselves to Use Tools*,
-  arXiv:2302.04761 (2023-02-09).
-- Wang, Chen, Yuan, Zhang, Li, Peng, Ji, *Executable Code Actions Elicit
-  Better LLM Agents*, arXiv:2402.01030 (2024-02-01, ICML 2024) — Chapter 4
-  covers this paper's thesis directly.
-- Cobbe et al., *Training Verifiers to Solve Math Word Problems* (2021) —
-  the paper that introduced GSM8K, the benchmark PAL's verified 15% result
-  is measured on; worth reading to understand what GSM8K actually tests
-  before treating the 15% figure as a general claim about all reasoning
-  tasks rather than specifically grade-school math word problems.
+- Yao et al., [*ReAct: Synergizing Reasoning and Acting in Language
+  Models*](https://arxiv.org/abs/2210.03629) (ICLR 2023).
+- Gao et al., [*PAL: Program-Aided Language
+  Models*](https://arxiv.org/abs/2211.10435) (2022).
+- Schick et al., [*Toolformer: Language Models Can Teach Themselves to Use
+  Tools*](https://arxiv.org/abs/2302.04761) (2023).
+- Wang et al., [*Executable Code Actions Elicit Better LLM
+  Agents*](https://arxiv.org/abs/2402.01030) (ICML 2024).

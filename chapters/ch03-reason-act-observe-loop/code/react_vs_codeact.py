@@ -145,20 +145,12 @@ def run_codeact_loop(thought: str, code: str, env_globals: dict) -> list[tuple[s
 
 
 # ---------------------------------------------------------------------------
-# A real failure class: correct Observations, wrong Thought-level arithmetic
+# Failure example: correct observations, wrong interpretation
 # ---------------------------------------------------------------------------
 #
-# PAL's own abstract (Gao et al., verified quote in the chapter README) names
-# this exact failure mode: "LLMs often make logical and arithmetic mistakes
-# in the solution part, even when the problem is decomposed correctly." ReAct
-# is vulnerable to precisely this, in a way CodeAct structurally is not: a
-# ReAct trace's running comparison ("is X bigger than the max so far?") lives
-# entirely in free-form Thought text, re-derived by the model at every step,
-# with NOTHING in the loop verifying a Thought's claim against the actual
-# numbers. Two scripts below share IDENTICAL, correct Observations (every
-# read_file call returns the true value) but differ at exactly one Thought's
-# arithmetic — showing the loop has no mechanism to catch a wrong claim about
-# data it already observed correctly.
+# The two scripts below receive identical, correct observations but differ at
+# one reasoning step. This isolates an important loop property: successful
+# actions do not verify the model's interpretation of their results.
 
 LONG_WORKSPACE: dict[str, str] = {
     "a.txt": "42", "b.txt": "17", "c.txt": "8", "d.txt": "55", "e.txt": "31", "f.txt": "9",
@@ -195,9 +187,7 @@ CORRECT_LONG_REACT_SCRIPT: list[ReActStep] = [
 
 # Identical Observations to the script above (every read_file call is real and
 # correct) — the ONLY difference is the Thought at step 5, which misreads the
-# comparison (claims 55 is NOT bigger than 42) exactly the way PAL's abstract
-# describes: correct decomposition (it did check the right file), wrong
-# arithmetic in the solution part.
+# comparison (claims 55 is not bigger than 42).
 FLAWED_LONG_REACT_SCRIPT: list[ReActStep] = [
     ReActStep("Check a.txt first.", "read_file", "a.txt"),
     ReActStep("a.txt is 42. Current max is 42 (a.txt). Check b.txt.", "read_file", "b.txt"),
@@ -236,7 +226,7 @@ def run_long_react_loop(script: list[ReActStep], max_steps: int = 10) -> list[tu
 
 
 def run_long_codeact_loop() -> tuple[list[tuple[str, str]], str]:
-    """The same 6-file task as one CodeAct action — correctness delegated to max()."""
+    """Run the same task with comparison delegated to Python's max()."""
     thought = "I'll read all six files and let Python's max() find the largest — no manual tracking."
     code = (
         'values = {f: int(read_file(f)) for f in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"]}\n'
@@ -251,45 +241,32 @@ def run_long_codeact_loop() -> tuple[list[tuple[str, str]], str]:
 
 
 # ---------------------------------------------------------------------------
-# Historical lineage — verified titles/authors/dates (see chapter README)
+# Conceptual lineage (see chapter README for linked sources)
 # ---------------------------------------------------------------------------
 
 HISTORICAL_TIMELINE = [
     (
         "2022-10-06", "ReAct",
         "Yao, Zhao, Yu, Du, Shafran, Narasimhan, Cao — arXiv:2210.03629",
-        "Interleaves free-text Thought/Action/Observation steps; the action is a "
-        "call into a small, fixed tool set, expressed and parsed as text.",
+        "Interleaves reasoning traces with task-specific environment actions.",
     ),
     (
         "2022-11-18", "PAL",
         "Gao, Madaan, Zhou, Alon, Liu, Yang, Callan, Neubig — arXiv:2211.10435",
-        "Verified abstract quote: 'LLMs often make logical and arithmetic mistakes "
-        "in the solution part, even when the problem is decomposed correctly.' "
-        "PAL delegates the solution/computation step to a real Python interpreter "
-        "while leaving decomposition to the LLM — 'PAL using Codex achieves "
-        "state-of-the-art few-shot accuracy on GSM8K, surpassing PaLM-540B which "
-        "uses chain-of-thought by absolute 15% top-1' (verified abstract claim). "
-        "This is the exact failure class the FLAWED_LONG_REACT_SCRIPT demo below "
-        "reproduces on purpose.",
+        "Generates programs as intermediate reasoning and delegates computation "
+        "to an interpreter.",
     ),
     (
         "2023-02-09", "Toolformer",
         "Schick, Dwivedi-Yu, Dessi, Raileanu, Lomeli, Zettlemoyer, Cancedda, Scialom — arXiv:2302.04761",
-        "Verified abstract quote: the model learns, self-supervised, 'which APIs "
-        "to call, when to call them, what arguments to pass, and how to best "
-        "incorporate the results into future token prediction,' from as few as "
-        "'a handful of demonstrations for each API.' Different axis from PAL/"
-        "CodeAct: not code-as-computation, but training the tool-use DECISION "
-        "into the model itself rather than eliciting it via prompting.",
+        "Trains a model to decide when and how to call external APIs and use "
+        "their results.",
     ),
     (
         "2024-02-01", "CodeAct",
         "Wang, Chen, Yuan, Zhang, Li, Peng, Ji — arXiv:2402.01030",
-        "Proposes executable code as a unified action space for a ReAct-style "
-        "loop, replacing one-tool-per-turn text/JSON actions with a single "
-        "Python action that can call any available tool/library and compose "
-        "them with real control flow.",
+        "Uses executable Python as a unified action space within an iterative "
+        "agent that can revise actions after new observations.",
     ),
 ]
 
@@ -321,7 +298,7 @@ if __name__ == "__main__":
     print(f"\nCodeAct: {sum(1 for k, _ in codeact_transcript if k.startswith('Action'))} actions, "
           f"{len(codeact_transcript)} trace entries")
 
-    print("\n=== A real failure class: correct Observations, wrong Thought-level arithmetic ===")
+    print("\n=== Failure example: correct observations, wrong interpretation ===")
     print(f"Ground truth (computed independently): {_EXPECTED_ANSWER}")
 
     correct_transcript = run_long_react_loop(CORRECT_LONG_REACT_SCRIPT)
